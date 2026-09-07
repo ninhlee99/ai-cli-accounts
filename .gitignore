@@ -1,6 +1,5 @@
 am
 /am
 .am/
-go.sum
 *.amexp
 all-account*
