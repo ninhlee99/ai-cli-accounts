@@ -51,6 +51,12 @@ func usage() {
   am run  <tool> [args...]  exec the tool with env pointed at a running proxy
   am up   <tool> [args...]  like 'run', but auto-starts the proxy if needed
 
+  am export [tool] [name..] print an encrypted, passphrase-protected blob of
+                            profiles to move to another machine
+  am import [--file f] [--activate tool=name]
+                            read a blob (stdin or -f) and add profiles that
+                            aren't present yet; existing ones are kept as-is
+
 tools: claude, codex, gemini
 profiles are encrypted with a master key held in the macOS Keychain.
 `)
@@ -90,6 +96,10 @@ func main() {
 	case "up":
 		need(args, 2)
 		cmdUp(args[1], args[2:])
+	case "export":
+		cmdExport(args[1:])
+	case "import":
+		cmdImport(args[1:])
 	case "-h", "--help", "help":
 		usage()
 	default:

@@ -53,6 +53,43 @@ The master key is generated once and stored in the macOS Keychain
 (`am-master-key`). The cleartext `*.meta.json` sidecar holds only the account
 name and timestamp — no secrets.
 
+## Move accounts to another machine
+
+No re-login needed. On the source machine:
+
+```sh
+am export                    # all profiles; prompts for a passphrase (twice)
+am export claude             # just Claude's profiles
+am export claude you@gmail.com other@x.com   # specific ones
+```
+
+It prints one line: `AMEXP1.<base64>` — a gzip'd JSON of the profiles,
+encrypted with AES-256-GCM under a key derived from your passphrase
+(scrypt N=2^15). Safe to paste into chat or a note; useless without the
+passphrase.
+
+On the target machine:
+
+```sh
+am import                    # paste the AMEXP1.… line, then Ctrl-D
+am import -f blob.txt         # ...or read it from a file
+am import --activate claude=you@gmail.com   # also `am use` it after import
+```
+
+Merge rules:
+
+- a profile whose **tool + account** already exists here → **kept as-is**
+  (its existing token is *not* overwritten by the imported one);
+- a profile whose **name** is already taken by a different account → kept,
+  not clobbered;
+- everything else → added.
+
+Import only writes to `~/.am`. It does not touch the live keychain / config
+files until you `am use` (or pass `--activate`). Pre-existing profiles always
+remain in the list.
+
+Non-interactive: set `AM_PASSPHRASE` instead of being prompted.
+
 ### What gets captured
 
 | tool   | artifacts |
@@ -121,3 +158,4 @@ expiry, cooldowns, and switch count.
 | `keychain_darwin.go`  | `security` CLI wrapper (raw-value safe) |
 | `proxy.go`            | reverse proxy + rotator |
 | `claude_token.go`     | Claude OAuth token parse / refresh |
+| `transfer.go`         | `am export` / `am import` (passphrase-encrypted bundle) |
