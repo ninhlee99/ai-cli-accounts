@@ -23,6 +23,9 @@ type profileMeta struct {
 	Tool    string    `json:"tool"`
 	Account string    `json:"account"`
 	Saved   time.Time `json:"saved"`
+	// ID is a short handle like "claude1", assigned by position when listed —
+	// not stored. Use it with `am sw claude1`.
+	ID string `json:"-"`
 }
 
 type entry struct {
@@ -68,7 +71,15 @@ func listProfiles(tool string) []profileMeta {
 			out = append(out, m)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Saved.Equal(out[j].Saved) {
+			return out[i].Saved.Before(out[j].Saved) // stable oldest-first ordering
+		}
+		return out[i].Name < out[j].Name
+	})
+	for i := range out {
+		out[i].ID = fmt.Sprintf("%s%d", tool, i+1)
+	}
 	return out
 }
 

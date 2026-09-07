@@ -30,15 +30,16 @@ macOS only (uses the `security` keychain CLI). Needs Go 1.22+.
 am add                       # save whatever account you're logged into now
                              # (log into another one, run again to add it)
 am add codex                 # same for codex / gemini
-am ls                        # list profiles, * = active
-am switch you@gmail.com      # use another account now (see below)
-am rm you@gmail.com
+am ls                        # list profiles with their IDs, * = active
+am sw                        # pick an account from a menu (↑/↓, Enter)
+am sw claude2                # ...or switch straight to it by ID
+am rm claude2
 am status                    # active account + rate limits
 ```
 
-The profile name is the account's email — read from the CLI's own token, so
-you never type it. `am switch` / `am rm` take an exact name or a unique part
-of it.
+Each profile gets a short ID — `claude1`, `claude2`, `codex1` — assigned by
+age (oldest = 1). `am sw` / `am rm` take that ID, the account email, an exact
+profile name, or any unique part of the name/email.
 
 Profiles live in `~/.am/profiles/<tool>/<name>.amp`, encrypted with AES-256-GCM
 under a key stored in the macOS Keychain (`am-master-key`). The `*.meta.json`

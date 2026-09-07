@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -47,9 +48,10 @@ account before a rate limit stops you (no restart), and stops when the last
 session ends.
 
   am add [tool]             save an account into a profile   (default: claude)
-  am ls [tool]              list saved profiles
-  am rm [tool] <name>       delete a profile
-  am switch [tool] <name>   use another account now — no restart
+  am ls [tool]              list profiles with their IDs (claude1, claude2, …)
+  am rm <id|name>           delete a profile
+  am sw                     pick an account from a menu (↑/↓, Enter)
+  am sw <id|name>           switch straight to it — no restart  (e.g. am sw claude2)
   am status                 what's active, rate limits, switch count
 
   am hook install|uninstall|status
@@ -58,9 +60,9 @@ session ends.
   am export [tool] [name..] encrypted blob of profiles for another machine
   am import [--file f] [--activate tool=name]
 
-<name> matches an exact profile name or a unique part of it / the email.
-tools: claude (auto-rotated), codex, gemini (switch writes to disk; restart
-the tool). Profiles are encrypted with a key in the macOS Keychain.
+<id|name> is a profile ID (claude1), an exact name, or a unique part of the
+name / email. tools: claude (auto-rotated), codex, gemini (switch writes to
+disk; restart the tool). Profiles are encrypted with a key in the Keychain.
 `)
 }
 
@@ -76,13 +78,22 @@ func main() {
 	case "ls", "list":
 		cmdLs(args[1:])
 	case "rm", "remove":
-		need(args, 2)
 		tool, name := toolAndName(args[1:])
+		if name == "" {
+			die("usage: am rm [tool] <name>   (name, ID, or part of the email)")
+		}
 		cmdRm(tool, resolveName(tool, name))
 	case "switch", "sw":
-		need(args, 2)
 		tool, name := toolAndName(args[1:])
-		cmdSwitch(tool, resolveName(tool, name))
+		if name == "" {
+			name = pickProfile(tool)
+			if name == "" {
+				return // cancelled
+			}
+		} else {
+			name = resolveName(tool, name)
+		}
+		cmdSwitch(tool, name)
 	case "status", "st":
 		cmdStatus()
 	case "hook":
@@ -110,15 +121,27 @@ func toolArg(args []string, i int) string {
 	return "claude"
 }
 
-// toolAndName parses "[tool] <name>": if the first arg is a known tool the rest
-// is the name, otherwise the tool defaults to claude and all of it is the name.
+// toolAndName parses "[tool] [name]". The tool comes from a leading known-tool
+// word ("codex foo"), or from an ID-style name ("codex1"). Otherwise the tool
+// is claude and everything is the name.
 func toolAndName(rest []string) (tool, name string) {
-	if len(rest) >= 2 {
-		if _, ok := loadConfig().Tools[rest[0]]; ok {
+	tools := loadConfig().Tools
+	if len(rest) >= 1 {
+		if _, ok := tools[rest[0]]; ok {
 			return rest[0], strings.Join(rest[1:], " ")
 		}
 	}
-	return "claude", strings.Join(rest, " ")
+	joined := strings.Join(rest, " ")
+	for t := range tools {
+		if m := idRe(t).FindStringSubmatch(joined); m != nil {
+			return t, joined
+		}
+	}
+	return "claude", joined
+}
+
+func idRe(tool string) *regexp.Regexp {
+	return regexp.MustCompile(`^` + regexp.QuoteMeta(tool) + `\d+$`)
 }
 
 func need(args []string, n int) {
@@ -128,14 +151,14 @@ func need(args []string, n int) {
 }
 
 
-// resolveName lets the user pass a partial profile name (or the account's
-// email / id). Exact match wins; otherwise a unique case-insensitive substring
-// match of the profile name or its account. Ambiguous or missing -> error.
+// resolveName maps what the user typed to a profile name. Matches, in order:
+// the short ID ("claude1"), an exact name, then a unique case-insensitive
+// substring of the name or the account email. Ambiguous / missing -> error.
 func resolveName(tool, q string) string {
 	profs := listProfiles(tool)
 	for _, p := range profs {
-		if p.Name == q {
-			return q
+		if strings.EqualFold(p.ID, q) || p.Name == q {
+			return p.Name
 		}
 	}
 	ql := strings.ToLower(q)
@@ -182,12 +205,12 @@ func cmdLs(args []string) {
 		tools = []string{args[0]}
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "TOOL\tPROFILE\tACTIVE\tACCOUNT\tSAVED")
+	fmt.Fprintln(w, "ID\tACCOUNT\tACTIVE\tSAVED")
 	for _, tn := range tools {
 		active := readActivePointer(tn)
 		profs := listProfiles(tn)
 		if len(profs) == 0 {
-			fmt.Fprintf(w, "%s\t-\t\t\t\n", tn)
+			fmt.Fprintf(w, "%s\t(none — am add %s)\t\t\n", tn, tn)
 			continue
 		}
 		for _, p := range profs {
@@ -195,7 +218,7 @@ func cmdLs(args []string) {
 			if p.Name == active {
 				mark = "*"
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", tn, p.Name, mark, p.Account, p.Saved.Format("2006-01-02 15:04"))
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", p.ID, orDash(p.Account), mark, p.Saved.Format("2006-01-02 15:04"))
 		}
 	}
 	w.Flush()
