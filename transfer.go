@@ -196,11 +196,11 @@ func cmdImport(args []string) {
 			kept++
 			continue
 		}
-		// Also skip if a same-named profile exists (different account) — don't clobber.
+		// Same name, different account: keep the existing one, rename the import.
+		orig := p.Name
 		if _, err := os.Stat(bundlePath(p.Tool, p.Name)); err == nil {
-			fmt.Printf("keep   %s/%s  (name already used; not overwriting)\n", p.Tool, p.Name)
-			kept++
-			continue
+			p.Name = uniqueProfileName(p.Tool, orig, p.Account)
+			fmt.Printf("rename %s/%s already used -> importing as %q\n", p.Tool, orig, p.Name)
 		}
 		writePortableProfile(p)
 		fmt.Printf("add    %s/%s  (%s)\n", p.Tool, p.Name, orDash(p.Account))
@@ -230,6 +230,26 @@ func readExportBlob(r io.Reader) string {
 	}
 	die("no %s… line found on input (paste the export blob, then Ctrl-D)", exportMagic)
 	return ""
+}
+
+// uniqueProfileName finds a free profile name for an import that collides with
+// an existing (differently-accounted) name: "<base>-<account>", then
+// "<base>-2", "<base>-3", …
+func uniqueProfileName(tool, base, account string) string {
+	free := func(n string) bool {
+		_, err := os.Stat(bundlePath(tool, n))
+		return os.IsNotExist(err)
+	}
+	if account != "" && !strings.Contains(base, account) {
+		if c := sanitizeName(base + "-" + account); free(c) {
+			return c
+		}
+	}
+	for i := 2; ; i++ {
+		if c := fmt.Sprintf("%s-%d", base, i); free(c) {
+			return c
+		}
+	}
 }
 
 func profileNameForAccount(tool, account string) string {

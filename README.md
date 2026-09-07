@@ -80,8 +80,9 @@ Merge rules:
 
 - a profile whose **tool + account** already exists here → **kept as-is**
   (its existing token is *not* overwritten by the imported one);
-- a profile whose **name** is already taken by a different account → kept,
-  not clobbered;
+- a profile whose **name** is already taken by a different account → the
+  existing one keeps the name; the import is added under a new name
+  (`<name>-<account>`, else `<name>-2`, `-3`, …);
 - everything else → added.
 
 Import only writes to `~/.am`. It does not touch the live keychain / config
