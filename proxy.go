@@ -10,16 +10,12 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
-
-	"golang.org/x/sys/unix"
-	"golang.org/x/term"
 )
 
 // cmdProxy runs a local reverse proxy in front of api.anthropic.com. It injects
@@ -469,7 +465,7 @@ func runTool(tool string, rest []string, autostart bool) {
 		if !proxyUp(base) {
 			die("proxy failed to start; see %s", filepath.Join(baseDir(), "proxy.log"))
 		}
-		fmt.Printf("am: proxy started in background (log: %s)\n", filepath.Join(baseDir(), "proxy.log"))
+		fmt.Fprintf(os.Stderr, "am: proxy started in background (log: %s)\n", filepath.Join(baseDir(), "proxy.log"))
 	}
 
 	// Claude Code needs a valid OAuth credential on disk to start at all (it
@@ -477,142 +473,10 @@ func runTool(tool string, rest []string, autostart bool) {
 	// credential is the one installed, so the UI shows the right account.
 	ensureActiveCredentialInstalled()
 
-	runChildRestoringTerminal(bin, append([]string{tool}, rest...), env)
-}
-
-// runChildRestoringTerminal runs the child sharing our stdio, then repairs the
-// terminal afterwards. TUI apps like Claude Code query the terminal
-// (XTVERSION, Primary Device Attributes, bracketed paste, alt screen…) on
-// startup; if they exit without fully draining the replies, the escape
-// sequences land on the shell prompt. We reset the modes they commonly leave
-// on and consume any late query replies still in the input buffer.
-func runChildRestoringTerminal(bin string, argv, env []string) {
-	// Close the canonical-mode echo window: between our last println and the
-	// moment Claude Code puts the tty in raw mode, a device-report reply the
-	// child requested (XTVERSION, DA1) can arrive while the line discipline is
-	// still echoing — the terminal then prints it and the child never reads
-	// it. Briefly take the tty into raw mode ourselves and drain it, then hand
-	// a clean tty to the child (which sets its own mode immediately).
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		if st, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
-			drainQuiet(int(os.Stdin.Fd()), 40*time.Millisecond, 200*time.Millisecond)
-			_ = term.Restore(int(os.Stdin.Fd()), st)
-		}
-	}
-
-	cmd := exec.Command(bin, argv[1:]...)
-	cmd.Args = argv
-	cmd.Env = env
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	// Forward signals to the child; it owns the terminal while it runs.
-	sig := make(chan os.Signal, 4)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
-	if err := cmd.Start(); err != nil {
-		die("start %s: %v", bin, err)
-	}
-	go func() {
-		for s := range sig {
-			if cmd.Process != nil {
-				_ = cmd.Process.Signal(s)
-			}
-		}
-	}()
-	err := cmd.Wait()
-	signal.Stop(sig)
-	close(sig)
-
-	restoreTerminal()
-
-	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			if ws, ok := ee.Sys().(syscall.WaitStatus); ok {
-				os.Exit(ws.ExitStatus())
-			}
-			os.Exit(1)
-		}
-		die("%s: %v", bin, err)
-	}
-}
-
-func restoreTerminal() {
-	if !term.IsTerminal(int(os.Stdout.Fd())) {
-		return
-	}
-	// First eat any stray device-report replies (see below), then defensively
-	// undo the modes a TUI leaves set in case it crashed before its own
-	// cleanup ran. Claude Code normally resets these itself; doing it again is
-	// harmless. Not a hard `ESC c` — that would clear scrollback.
-	swallowStrayReplies()
-	fmt.Fprint(os.Stdout, "\x1b[?1049l\x1b[?2004l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?7h\x1b[0m")
-}
-
-// swallowStrayReplies eats device-report replies that a TUI (Claude Code)
-// requested at startup — XTVERSION as a DCS string, Primary Device Attributes
-// as "ESC [ ? … c", cursor position as "ESC [ … R" — but exited before reading,
-// so they would otherwise print on the next shell prompt.
-//
-// We do NOT send a query of our own — that just produces one more reply to
-// leak. We passively drain stdin, holding the terminal for a grace window
-// because iTerm2 can deliver these replies tens of ms after the child exits.
-// We stop early once the input has been quiet for a short spell.
-func swallowStrayReplies() {
-	fd := int(os.Stdin.Fd())
-	if !term.IsTerminal(fd) {
-		return
-	}
-	old, err := term.MakeRaw(fd)
-	if err != nil {
-		return
-	}
-	defer term.Restore(fd, old)
-
-	buf := make([]byte, 256)
-	hardCap := time.Now().Add(500 * time.Millisecond)
-	quietNeeded := 120 * time.Millisecond // stop after this long with no input
-	lastData := time.Now()
-
-	for time.Now().Before(hardCap) {
-		if time.Since(lastData) >= quietNeeded {
-			return
-		}
-		pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
-		n, perr := unix.Poll(pfd, 20)
-		if perr != nil {
-			return
-		}
-		if n == 0 {
-			continue
-		}
-		if _, rerr := unix.Read(fd, buf); rerr != nil {
-			return
-		}
-		lastData = time.Now()
-	}
-}
-
-// drainQuiet reads and discards pending bytes on an already-raw fd, returning
-// once input has been quiet for quiet, or the hard cap elapses.
-func drainQuiet(fd int, quiet, hardCap time.Duration) {
-	buf := make([]byte, 256)
-	deadline := time.Now().Add(hardCap)
-	last := time.Now()
-	for time.Now().Before(deadline) {
-		if time.Since(last) >= quiet {
-			return
-		}
-		pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
-		n, err := unix.Poll(pfd, 10)
-		if err != nil || n == 0 {
-			continue
-		}
-		if _, err := unix.Read(fd, buf); err != nil {
-			return
-		}
-		last = time.Now()
-	}
+	// Replace this process with the tool — same as running it directly, so its
+	// terminal handling (device-attribute queries at startup, mode restore on
+	// exit) behaves identically to launching it without `am`.
+	execProcess(bin, append([]string{tool}, rest...), env)
 }
 
 // ensureActiveCredentialInstalled restores the proxy's active profile onto the
