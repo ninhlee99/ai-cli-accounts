@@ -528,25 +528,23 @@ func restoreTerminal() {
 	if !term.IsTerminal(int(os.Stdout.Fd())) {
 		return
 	}
-	// ESC c would hard-reset (clears scrollback); instead undo the specific
-	// modes a TUI typically leaves set:
-	//   [?1049l exit alt screen   [?2004l bracketed paste off
-	//   [?25h   show cursor       [?1000/1002/1003/1006 l  mouse tracking off
-	//   [?7h    autowrap on       [0m     reset SGR
-	fmt.Fprint(os.Stdout, "\x1b[?1049l\x1b[?2004l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?7h\x1b[0m")
-
+	// First eat any stray device-report replies (see below), then defensively
+	// undo the modes a TUI leaves set in case it crashed before its own
+	// cleanup ran. Claude Code normally resets these itself; doing it again is
+	// harmless. Not a hard `ESC c` — that would clear scrollback.
 	swallowStrayReplies()
+	fmt.Fprint(os.Stdout, "\x1b[?1049l\x1b[?2004l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?7h\x1b[0m")
 }
 
-// swallowStrayReplies clears device-report replies that a TUI (Claude Code)
+// swallowStrayReplies eats device-report replies that a TUI (Claude Code)
 // requested at startup — XTVERSION as a DCS string, Primary Device Attributes
 // as "ESC [ ? … c", cursor position as "ESC [ … R" — but exited before reading,
 // so they would otherwise print on the next shell prompt.
 //
-// Strategy: keep holding the terminal for a short grace period after the child
-// exits (the reply can land tens of ms late), while continuously draining
-// stdin. We also post our OWN DA1 query as a barrier: once we see its reply
-// ("ESC [ ? … c") everything the terminal owed us has arrived and been eaten.
+// We do NOT send a query of our own — that just produces one more reply to
+// leak. We passively drain stdin, holding the terminal for a grace window
+// because iTerm2 can deliver these replies tens of ms after the child exits.
+// We stop early once the input has been quiet for a short spell.
 func swallowStrayReplies() {
 	fd := int(os.Stdin.Fd())
 	if !term.IsTerminal(fd) {
@@ -558,24 +556,14 @@ func swallowStrayReplies() {
 	}
 	defer term.Restore(fd, old)
 
-	// Barrier query — its reply is "ESC [ ? … c".
-	_, _ = os.Stdout.WriteString("\x1b[c")
-
-	buf := make([]byte, 1)
-	var acc []byte
-	sawBarrier := false
-	grace := 150 * time.Millisecond           // min time to hold after child exit
-	hardCap := time.Now().Add(600 * time.Millisecond)
-	graceUntil := time.Now().Add(grace)
+	buf := make([]byte, 256)
+	hardCap := time.Now().Add(500 * time.Millisecond)
+	quietNeeded := 120 * time.Millisecond // stop after this long with no input
+	lastData := time.Now()
 
 	for time.Now().Before(hardCap) {
-		// Stop once the barrier reply is in AND the grace window elapsed AND
-		// nothing more is waiting.
-		if sawBarrier && time.Now().After(graceUntil) {
-			pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
-			if n, _ := unix.Poll(pfd, 0); n == 0 {
-				return
-			}
+		if time.Since(lastData) >= quietNeeded {
+			return
 		}
 		pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
 		n, perr := unix.Poll(pfd, 20)
@@ -588,19 +576,8 @@ func swallowStrayReplies() {
 		if _, rerr := unix.Read(fd, buf); rerr != nil {
 			return
 		}
-		acc = append(acc, buf[0])
-		if len(acc) > 4096 {
-			acc = acc[len(acc)-256:]
-		}
-		if buf[0] == 'c' && bytesContains(acc, []byte("\x1b[?")) {
-			sawBarrier = true
-			graceUntil = time.Now().Add(40 * time.Millisecond) // brief settle after barrier
-		}
+		lastData = time.Now()
 	}
-}
-
-func bytesContains(h, n []byte) bool {
-	return strings.Contains(string(h), string(n))
 }
 
 // ensureActiveCredentialInstalled restores the proxy's active profile onto the
