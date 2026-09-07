@@ -9,9 +9,12 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -312,7 +315,13 @@ func parseFirstTime(h http.Header, keys ...string) time.Time {
 }
 
 // cmdRun execs a tool with env pointed at a running proxy.
-func cmdRun(tool string, rest []string) {
+func cmdRun(tool string, rest []string) { runTool(tool, rest, false) }
+
+// cmdUp is like cmdRun but starts the proxy in the background first if it is
+// not already listening.
+func cmdUp(tool string, rest []string) { runTool(tool, rest, true) }
+
+func runTool(tool string, rest []string, autostart bool) {
 	addr := envOr("AM_PROXY_ADDR", "127.0.0.1:8787")
 	base := "http://" + addr
 	env := os.Environ()
@@ -324,17 +333,59 @@ func cmdRun(tool string, rest []string) {
 			"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
 		)
 	default:
-		die("am run currently supports: claude")
+		die("only supports: claude")
 	}
-	// Fail fast if the proxy isn't up.
-	if _, err := http.Get(base + "/_am/status"); err != nil {
-		die("proxy not reachable at %s (start it with: am proxy)", base)
+	if !proxyUp(base) {
+		if !autostart {
+			die("proxy not reachable at %s (start it with: am proxy)", base)
+		}
+		startProxyBackground(addr)
+		for i := 0; i < 50; i++ {
+			if proxyUp(base) {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if !proxyUp(base) {
+			die("proxy failed to start; see %s", filepath.Join(baseDir(), "proxy.log"))
+		}
+		fmt.Printf("am: proxy started in background (log: %s)\n", filepath.Join(baseDir(), "proxy.log"))
 	}
 	bin, err := lookPath(tool)
 	if err != nil {
 		die("%v", err)
 	}
 	execProcess(bin, append([]string{tool}, rest...), env)
+}
+
+func proxyUp(base string) bool {
+	c := http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := c.Get(base + "/_am/status")
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return true
+}
+
+func startProxyBackground(addr string) {
+	self, err := os.Executable()
+	if err != nil {
+		die("locate self: %v", err)
+	}
+	_ = os.MkdirAll(baseDir(), 0o700)
+	logf, err := os.OpenFile(filepath.Join(baseDir(), "proxy.log"),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		die("open proxy.log: %v", err)
+	}
+	cmd := exec.Command(self, "proxy", "--addr", addr)
+	cmd.Stdout, cmd.Stderr = logf, logf
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		die("start proxy: %v", err)
+	}
+	_ = cmd.Process.Release()
 }
 
 func envOr(k, d string) string {

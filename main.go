@@ -46,6 +46,7 @@ func usage() {
                             run the rotating proxy (Claude: auto-switch profile
                             before the rate limit is hit, refresh OAuth tokens)
   am run  <tool> [args...]  exec the tool with env pointed at a running proxy
+  am up   <tool> [args...]  like 'run', but auto-starts the proxy if needed
 
 tools: claude, codex, gemini
 profiles are encrypted with a master key held in the macOS Keychain.
@@ -80,6 +81,9 @@ func main() {
 	case "run":
 		need(args, 2)
 		cmdRun(args[1], args[2:])
+	case "up":
+		need(args, 2)
+		cmdUp(args[1], args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
