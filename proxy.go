@@ -535,12 +535,19 @@ func restoreTerminal() {
 	//   [?7h    autowrap on       [0m     reset SGR
 	fmt.Fprint(os.Stdout, "\x1b[?1049l\x1b[?2004l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?7h\x1b[0m")
 
-	// Drain any device-report replies (XTVERSION DCS, DA1 `…c`, cursor pos
-	// `…R`) still sitting in stdin, so they don't print at the next prompt.
-	drainStdin(60 * time.Millisecond)
+	swallowStrayReplies()
 }
 
-func drainStdin(window time.Duration) {
+// swallowStrayReplies clears device-report replies that a TUI (Claude Code)
+// requested at startup — XTVERSION as a DCS string, Primary Device Attributes
+// as "ESC [ ? … c", cursor position as "ESC [ … R" — but exited before reading,
+// so they would otherwise print on the next shell prompt.
+//
+// We can't know how many are pending or when the last one arrives, so we post
+// our OWN Primary Device Attributes query and read until we see its reply: any
+// stray replies that arrive before it are consumed in the same pass. Our query
+// reply itself is then discarded too.
+func swallowStrayReplies() {
 	fd := int(os.Stdin.Fd())
 	if !term.IsTerminal(fd) {
 		return
@@ -551,20 +558,53 @@ func drainStdin(window time.Duration) {
 	}
 	defer term.Restore(fd, old)
 
-	buf := make([]byte, 512)
-	deadline := time.Now().Add(window)
-	for time.Now().Before(deadline) {
-		// poll(2): is there anything to read within 20ms?
+	// Ask the terminal to identify itself (DA1). Its reply is "ESC [ ? … c".
+	if _, err := os.Stdout.WriteString("\x1b[c"); err != nil {
+		return
+	}
+
+	buf := make([]byte, 1)
+	var acc []byte
+	overall := time.Now().Add(400 * time.Millisecond) // hard cap
+	for time.Now().Before(overall) {
 		pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
-		n, perr := unix.Poll(pfd, 20)
-		if perr != nil || n == 0 {
-			continue
+		n, perr := unix.Poll(pfd, 50)
+		if perr != nil {
+			return
+		}
+		if n == 0 {
+			continue // wait for our reply
 		}
 		if _, rerr := unix.Read(fd, buf); rerr != nil {
 			return
 		}
-		deadline = time.Now().Add(window) // reset while bytes keep coming
+		acc = append(acc, buf[0])
+		// Our DA1 reply ends in 'c' and is preceded somewhere by "ESC [ ?".
+		if buf[0] == 'c' && bytesContains(acc, []byte("\x1b[?")) {
+			// give a beat for a trailing byte, then one non-blocking sweep
+			drainRemaining(fd, 30*time.Millisecond)
+			return
+		}
 	}
+}
+
+func drainRemaining(fd int, window time.Duration) {
+	buf := make([]byte, 256)
+	deadline := time.Now().Add(window)
+	for time.Now().Before(deadline) {
+		pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		if n, err := unix.Poll(pfd, 10); err != nil || n == 0 {
+			continue
+		}
+		if _, err := unix.Read(fd, buf); err != nil {
+			return
+		}
+		deadline = time.Now().Add(window)
+	}
+}
+
+func bytesContains(h, n []byte) bool {
+	return strings.Contains(string(h), string(n))
 }
 
 // ensureActiveCredentialInstalled restores the proxy's active profile onto the
