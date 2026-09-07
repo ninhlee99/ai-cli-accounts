@@ -543,10 +543,10 @@ func restoreTerminal() {
 // as "ESC [ ? … c", cursor position as "ESC [ … R" — but exited before reading,
 // so they would otherwise print on the next shell prompt.
 //
-// We can't know how many are pending or when the last one arrives, so we post
-// our OWN Primary Device Attributes query and read until we see its reply: any
-// stray replies that arrive before it are consumed in the same pass. Our query
-// reply itself is then discarded too.
+// Strategy: keep holding the terminal for a short grace period after the child
+// exits (the reply can land tens of ms late), while continuously draining
+// stdin. We also post our OWN DA1 query as a barrier: once we see its reply
+// ("ESC [ ? … c") everything the terminal owed us has arrived and been eaten.
 func swallowStrayReplies() {
 	fd := int(os.Stdin.Fd())
 	if !term.IsTerminal(fd) {
@@ -558,48 +558,44 @@ func swallowStrayReplies() {
 	}
 	defer term.Restore(fd, old)
 
-	// Ask the terminal to identify itself (DA1). Its reply is "ESC [ ? … c".
-	if _, err := os.Stdout.WriteString("\x1b[c"); err != nil {
-		return
-	}
+	// Barrier query — its reply is "ESC [ ? … c".
+	_, _ = os.Stdout.WriteString("\x1b[c")
 
 	buf := make([]byte, 1)
 	var acc []byte
-	overall := time.Now().Add(400 * time.Millisecond) // hard cap
-	for time.Now().Before(overall) {
+	sawBarrier := false
+	grace := 150 * time.Millisecond           // min time to hold after child exit
+	hardCap := time.Now().Add(600 * time.Millisecond)
+	graceUntil := time.Now().Add(grace)
+
+	for time.Now().Before(hardCap) {
+		// Stop once the barrier reply is in AND the grace window elapsed AND
+		// nothing more is waiting.
+		if sawBarrier && time.Now().After(graceUntil) {
+			pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+			if n, _ := unix.Poll(pfd, 0); n == 0 {
+				return
+			}
+		}
 		pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
-		n, perr := unix.Poll(pfd, 50)
+		n, perr := unix.Poll(pfd, 20)
 		if perr != nil {
 			return
 		}
 		if n == 0 {
-			continue // wait for our reply
+			continue
 		}
 		if _, rerr := unix.Read(fd, buf); rerr != nil {
 			return
 		}
 		acc = append(acc, buf[0])
-		// Our DA1 reply ends in 'c' and is preceded somewhere by "ESC [ ?".
+		if len(acc) > 4096 {
+			acc = acc[len(acc)-256:]
+		}
 		if buf[0] == 'c' && bytesContains(acc, []byte("\x1b[?")) {
-			// give a beat for a trailing byte, then one non-blocking sweep
-			drainRemaining(fd, 30*time.Millisecond)
-			return
+			sawBarrier = true
+			graceUntil = time.Now().Add(40 * time.Millisecond) // brief settle after barrier
 		}
-	}
-}
-
-func drainRemaining(fd int, window time.Duration) {
-	buf := make([]byte, 256)
-	deadline := time.Now().Add(window)
-	for time.Now().Before(deadline) {
-		pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
-		if n, err := unix.Poll(pfd, 10); err != nil || n == 0 {
-			continue
-		}
-		if _, err := unix.Read(fd, buf); err != nil {
-			return
-		}
-		deadline = time.Now().Add(window)
 	}
 }
 
