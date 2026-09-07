@@ -487,6 +487,19 @@ func runTool(tool string, rest []string, autostart bool) {
 // sequences land on the shell prompt. We reset the modes they commonly leave
 // on and consume any late query replies still in the input buffer.
 func runChildRestoringTerminal(bin string, argv, env []string) {
+	// Close the canonical-mode echo window: between our last println and the
+	// moment Claude Code puts the tty in raw mode, a device-report reply the
+	// child requested (XTVERSION, DA1) can arrive while the line discipline is
+	// still echoing — the terminal then prints it and the child never reads
+	// it. Briefly take the tty into raw mode ourselves and drain it, then hand
+	// a clean tty to the child (which sets its own mode immediately).
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		if st, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
+			drainQuiet(int(os.Stdin.Fd()), 40*time.Millisecond, 200*time.Millisecond)
+			_ = term.Restore(int(os.Stdin.Fd()), st)
+		}
+	}
+
 	cmd := exec.Command(bin, argv[1:]...)
 	cmd.Args = argv
 	cmd.Env = env
@@ -580,6 +593,28 @@ func swallowStrayReplies() {
 	}
 }
 
+// drainQuiet reads and discards pending bytes on an already-raw fd, returning
+// once input has been quiet for quiet, or the hard cap elapses.
+func drainQuiet(fd int, quiet, hardCap time.Duration) {
+	buf := make([]byte, 256)
+	deadline := time.Now().Add(hardCap)
+	last := time.Now()
+	for time.Now().Before(deadline) {
+		if time.Since(last) >= quiet {
+			return
+		}
+		pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		n, err := unix.Poll(pfd, 10)
+		if err != nil || n == 0 {
+			continue
+		}
+		if _, err := unix.Read(fd, buf); err != nil {
+			return
+		}
+		last = time.Now()
+	}
+}
+
 // ensureActiveCredentialInstalled restores the proxy's active profile onto the
 // system if the live login doesn't already match it.
 func ensureActiveCredentialInstalled() {
@@ -621,11 +656,17 @@ func startProxyBackground(addr string) {
 	if err != nil {
 		die("open proxy.log: %v", err)
 	}
+	devnull, _ := os.Open(os.DevNull)
 	cmd := exec.Command(self, "proxy", "--addr", addr)
-	cmd.Stdout, cmd.Stderr = logf, logf
+	cmd.Stdin = devnull // never share the tty — nothing the proxy does should
+	cmd.Stdout = logf   // ever touch the terminal the user is typing into
+	cmd.Stderr = logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		die("start proxy: %v", err)
+	}
+	if devnull != nil {
+		_ = devnull.Close()
 	}
 	_ = cmd.Process.Release()
 }
