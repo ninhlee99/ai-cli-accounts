@@ -49,7 +49,9 @@ session ends.
 
   am add [tool]             save an account into a profile   (default: claude)
   am ls [tool]              list profiles with their IDs (claude1, claude2, …)
-  am rm <id|name>           delete a profile
+  am rm <id|name>           move a profile to the trash (asks first)
+  am restore <id|name>      bring a trashed profile back
+  am restore --backup       re-import the latest auto-backup (after every add)
   am sw                     pick an account from a menu (↑/↓, Enter)
   am sw <id|name>           switch straight to it — no restart  (e.g. am sw claude2)
   am status                 what's active, rate limits, switch count
@@ -94,6 +96,13 @@ func main() {
 			name = resolveName(tool, name)
 		}
 		cmdSwitch(tool, name)
+	case "restore":
+		if len(args) > 1 && (args[1] == "--backup" || args[1] == "-b") {
+			cmdRestoreBackup(strings.Join(args[2:], " "))
+			return
+		}
+		tool, name := toolAndName(args[1:])
+		cmdRestore(tool, name)
 	case "status", "st":
 		cmdStatus()
 	case "hook":

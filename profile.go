@@ -303,6 +303,7 @@ func cmdSave(tool, name string) {
 	_ = os.WriteFile(metaPath(tool, name), mb, 0o600)
 	writeActivePointer(tool, name)
 	fmt.Printf("saved %s/%s (%s), %d artifacts\n", tool, name, orDash(m.Account), len(entries))
+	autoBackup()
 }
 
 func loadProfileEntries(tool, name string) []entry {
@@ -364,11 +365,72 @@ func syncActiveFromSystem(tool string) {
 	}
 }
 
+func trashDir(tool string) string { return filepath.Join(baseDir(), "trash", tool) }
+
+// cmdRm moves a profile to the trash after confirming. `am restore` brings it
+// back; the trash is never emptied automatically.
 func cmdRm(tool, name string) {
-	_ = os.Remove(bundlePath(tool, name))
-	_ = os.Remove(metaPath(tool, name))
+	if _, err := os.Stat(bundlePath(tool, name)); err != nil {
+		die("no profile %s/%s", tool, name)
+	}
+	m := readMeta(tool, name)
+	if !confirm(fmt.Sprintf("delete %s (%s)?", name, orDash(m.Account))) {
+		fmt.Println("kept.")
+		return
+	}
+	autoBackup() // snapshot everything before we remove one
+	if err := os.MkdirAll(trashDir(tool), 0o700); err != nil {
+		die("mkdir trash: %v", err)
+	}
+	stamp := time.Now().Format("20060102-150405")
+	_ = os.Rename(bundlePath(tool, name), filepath.Join(trashDir(tool), stamp+"__"+name+".amp"))
+	_ = os.Rename(metaPath(tool, name), filepath.Join(trashDir(tool), stamp+"__"+name+".meta.json"))
 	if readActivePointer(tool) == name {
 		_ = os.Remove(activePath(tool))
 	}
-	fmt.Printf("removed %s/%s\n", tool, name)
+	fmt.Printf("moved to trash — restore with: am restore %s\n", name)
+}
+
+// cmdRestore recovers the most recently trashed profile matching q (a name or
+// substring), for the given tool.
+func cmdRestore(tool, q string) {
+	des, _ := os.ReadDir(trashDir(tool))
+	type item struct{ stamp, name, base string }
+	var found []item
+	for _, de := range des {
+		n := de.Name()
+		if !strings.HasSuffix(n, ".meta.json") {
+			continue
+		}
+		body := strings.TrimSuffix(n, ".meta.json")
+		stamp, name, ok := strings.Cut(body, "__")
+		if !ok {
+			continue
+		}
+		if q == "" || strings.Contains(strings.ToLower(name), strings.ToLower(q)) {
+			found = append(found, item{stamp, name, body})
+		}
+	}
+	if len(found) == 0 {
+		die("nothing in trash for %s matching %q", tool, q)
+	}
+	sort.Slice(found, func(i, j int) bool { return found[i].stamp > found[j].stamp })
+	it := found[0]
+	if _, err := os.Stat(bundlePath(tool, it.name)); err == nil {
+		die("%s/%s already exists — remove or rename it first", tool, it.name)
+	}
+	_ = os.MkdirAll(profileDir(tool), 0o700)
+	_ = os.Rename(filepath.Join(trashDir(tool), it.base+".amp"), bundlePath(tool, it.name))
+	_ = os.Rename(filepath.Join(trashDir(tool), it.base+".meta.json"), metaPath(tool, it.name))
+	fmt.Printf("restored %s/%s\n", tool, it.name)
+}
+
+func confirm(prompt string) bool {
+	if os.Getenv("AM_YES") != "" {
+		return true
+	}
+	fmt.Printf("%s [y/N] ", prompt)
+	var ans string
+	fmt.Scanln(&ans)
+	return strings.EqualFold(strings.TrimSpace(ans), "y")
 }

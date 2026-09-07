@@ -45,6 +45,15 @@ Profiles live in `~/.am/profiles/<tool>/<name>.amp`, encrypted with AES-256-GCM
 under a key stored in the macOS Keychain (`am-master-key`). The `*.meta.json`
 sidecar next to each is cleartext but holds only the email and a timestamp.
 
+### Nothing is deleted outright
+
+- `am rm` asks to confirm, then **moves** the profile to `~/.am/trash/`.
+  `am restore <id|name>` brings the most recent match back.
+- Every `am add` (and every `am rm`) first writes an encrypted snapshot of
+  **all** profiles to `~/.am/backups/` (keyed by the machine's master key, 20
+  kept). `am restore --backup` re-imports the latest — additive, existing
+  profiles untouched.
+
 ## Move accounts to another machine
 
 No re-login needed. On the source machine:

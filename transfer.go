@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -82,28 +84,7 @@ func cmdExport(args []string) {
 		}
 	}
 
-	var bundle portableBundle
-	bundle.Version = 1
-	bundle.Exported = time.Now()
-
-	c := loadConfig()
-	for _, tn := range toolNames(c) {
-		if wantTool != "" && tn != wantTool {
-			continue
-		}
-		for _, m := range listProfiles(tn) {
-			if strings.HasPrefix(m.Name, "_") {
-				continue // skip _prev / autosave scratch profiles
-			}
-			if len(wantNames) > 0 && !wantNames[m.Name] {
-				continue
-			}
-			bundle.Profiles = append(bundle.Profiles, portableProfile{
-				Tool: tn, Name: m.Name, Account: m.Account, Saved: m.Saved,
-				Entries: loadProfileEntries(tn, m.Name),
-			})
-		}
-	}
+	bundle := collectBundle(wantTool, wantNames)
 	if len(bundle.Profiles) == 0 {
 		die("no profiles to export")
 	}
@@ -114,7 +95,40 @@ func cmdExport(args []string) {
 		die("passphrases do not match")
 	}
 
-	plain, _ := json.Marshal(bundle)
+	blob := sealBundle(bundle, pass, true) // pass = raw passphrase; sealBundle derives
+	fmt.Println(blob)
+	fmt.Fprintf(os.Stderr, "\nexported %d profile(s). Copy the line above to the other machine and run: am import\n", len(bundle.Profiles))
+}
+
+func collectBundle(wantTool string, wantNames map[string]bool) portableBundle {
+	var b portableBundle
+	b.Version = 1
+	b.Exported = time.Now()
+	for _, tn := range toolNames(loadConfig()) {
+		if wantTool != "" && tn != wantTool {
+			continue
+		}
+		for _, m := range listProfiles(tn) {
+			if strings.HasPrefix(m.Name, "_") {
+				continue
+			}
+			if len(wantNames) > 0 && !wantNames[m.Name] {
+				continue
+			}
+			b.Profiles = append(b.Profiles, portableProfile{
+				Tool: tn, Name: m.Name, Account: m.Account, Saved: m.Saved,
+				Entries: loadProfileEntries(tn, m.Name),
+			})
+		}
+	}
+	return b
+}
+
+// sealBundle gzips + AES-256-GCM encrypts the bundle. When saltInline is true
+// the key is passphrase-derived and a fresh salt is prepended; otherwise the
+// caller's key is used as-is (16 zero bytes stand in for the salt slot).
+func sealBundle(b portableBundle, key []byte, saltInline bool) string {
+	plain, _ := json.Marshal(b)
 	var gz bytes.Buffer
 	zw := gzip.NewWriter(&gz)
 	_, _ = zw.Write(plain)
@@ -122,17 +136,106 @@ func cmdExport(args []string) {
 
 	salt := make([]byte, 16)
 	nonce := make([]byte, 12)
-	_, _ = rand.Read(salt)
+	if saltInline {
+		_, _ = rand.Read(salt)
+		key = deriveKey(key, salt) // key here is the raw passphrase bytes
+	}
 	_, _ = rand.Read(nonce)
 
-	block, _ := aes.NewCipher(deriveKey(pass, salt))
+	block, _ := aes.NewCipher(key)
 	gcm, _ := cipher.NewGCM(block)
 	ct := gcm.Seal(nil, nonce, gz.Bytes(), nil)
-
 	out := append(append(salt, nonce...), ct...)
-	fmt.Println(exportMagic + base64.URLEncoding.EncodeToString(out))
+	return exportMagic + base64.URLEncoding.EncodeToString(out)
+}
 
-	fmt.Fprintf(os.Stderr, "\nexported %d profile(s). Copy the line above to the other machine and run: am import\n", len(bundle.Profiles))
+// autoBackup writes an encrypted snapshot of every profile to
+// ~/.am/backups/, keyed by the machine's master key (no passphrase — it's a
+// local safety net, not for transfer). Keeps the 20 most recent.
+func autoBackup() {
+	b := collectBundle("", nil)
+	if len(b.Profiles) == 0 {
+		return
+	}
+	dir := filepath.Join(baseDir(), "backups")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return
+	}
+	blob := sealBundle(b, masterKey(), false)
+	name := time.Now().Format("2006-01-02_150405") + ".amexp"
+	_ = os.WriteFile(filepath.Join(dir, name), []byte(blob), 0o600)
+	pruneBackups(dir, 20)
+}
+
+// cmdRestoreBackup re-imports the most recent auto-backup (or one named by
+// substring). Additive — same merge rules as `am import`.
+func cmdRestoreBackup(which string) {
+	dir := filepath.Join(baseDir(), "backups")
+	des, _ := os.ReadDir(dir)
+	var files []string
+	for _, de := range des {
+		if strings.HasSuffix(de.Name(), ".amexp") && (which == "" || strings.Contains(de.Name(), which)) {
+			files = append(files, de.Name())
+		}
+	}
+	if len(files) == 0 {
+		die("no auto-backups in %s", dir)
+	}
+	sort.Strings(files)
+	pick := files[len(files)-1]
+	blob, err := os.ReadFile(filepath.Join(dir, pick))
+	if err != nil {
+		die("read backup: %v", err)
+	}
+	b := openBundle(strings.TrimSpace(string(blob)), masterKey(), false)
+	n := mergeBundle(b)
+	fmt.Printf("restored from %s: %d profile(s) added\n", pick, n)
+}
+
+// openBundle decrypts a sealed blob. When saltInline the key is the raw
+// passphrase and the salt is read from the blob; otherwise key is used directly.
+func openBundle(blob string, key []byte, saltInline bool) portableBundle {
+	raw, err := base64.URLEncoding.DecodeString(strings.TrimPrefix(blob, exportMagic))
+	if err != nil {
+		die("bad blob (base64): %v", err)
+	}
+	if len(raw) < 16+12+16 {
+		die("bad blob (too short)")
+	}
+	salt, nonce, ct := raw[:16], raw[16:28], raw[28:]
+	if saltInline {
+		key = deriveKey(key, salt)
+	}
+	block, _ := aes.NewCipher(key)
+	gcm, _ := cipher.NewGCM(block)
+	gz, err := gcm.Open(nil, nonce, ct, nil)
+	if err != nil {
+		die("decrypt failed (wrong passphrase or key?)")
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(gz))
+	if err != nil {
+		die("gunzip: %v", err)
+	}
+	plain, _ := io.ReadAll(zr)
+	var b portableBundle
+	if json.Unmarshal(plain, &b) != nil {
+		die("bad bundle json")
+	}
+	return b
+}
+
+func pruneBackups(dir string, keep int) {
+	des, _ := os.ReadDir(dir)
+	var files []string
+	for _, de := range des {
+		if strings.HasSuffix(de.Name(), ".amexp") {
+			files = append(files, de.Name())
+		}
+	}
+	sort.Strings(files)
+	for i := 0; i < len(files)-keep; i++ {
+		_ = os.Remove(filepath.Join(dir, files[i]))
+	}
 }
 
 // ---- import ----
@@ -161,42 +264,31 @@ func cmdImport(args []string) {
 
 	blob := readExportBlob(src)
 	pass := readPassphrase("passphrase to decrypt the import: ")
+	bundle := openBundle(blob, pass, true)
 
-	raw, err := base64.URLEncoding.DecodeString(strings.TrimPrefix(blob, exportMagic))
-	if err != nil {
-		die("bad blob (base64): %v", err)
-	}
-	if len(raw) < 16+12+16 {
-		die("bad blob (too short)")
-	}
-	salt, nonce, ct := raw[:16], raw[16:28], raw[28:]
+	added := mergeBundle(bundle)
+	kept := len(bundle.Profiles) - added
+	fmt.Printf("\nimport done: %d added, %d already present (kept).\n", added, kept)
 
-	block, _ := aes.NewCipher(deriveKey(pass, salt))
-	gcm, _ := cipher.NewGCM(block)
-	gz, err := gcm.Open(nil, nonce, ct, nil)
-	if err != nil {
-		die("decrypt failed (wrong passphrase?)")
+	for tool, name := range activate {
+		resolved := resolveName(tool, name)
+		fmt.Printf("activating %s -> %s\n", tool, resolved)
+		cmdUse(tool, resolved)
 	}
-	zr, err := gzip.NewReader(bytes.NewReader(gz))
-	if err != nil {
-		die("gunzip: %v", err)
+	if len(activate) == 0 {
+		fmt.Println("nothing was applied to the system; run `am sw <id>` to switch to one.")
 	}
-	plain, _ := io.ReadAll(zr)
+}
 
-	var bundle portableBundle
-	if err := json.Unmarshal(plain, &bundle); err != nil {
-		die("bad bundle json: %v", err)
-	}
-
-	added, kept := 0, 0
-	for _, p := range bundle.Profiles {
-		// "Already logged in" == a profile for this tool + account already exists.
+// mergeBundle adds profiles that aren't present, keeping existing ones
+// untouched. Returns how many were added.
+func mergeBundle(b portableBundle) int {
+	added := 0
+	for _, p := range b.Profiles {
 		if existing := profileNameForAccount(p.Tool, p.Account); existing != "" {
 			fmt.Printf("keep   %s/%s  (%s already present as %q)\n", p.Tool, p.Name, p.Account, existing)
-			kept++
 			continue
 		}
-		// Same name, different account: keep the existing one, rename the import.
 		orig := p.Name
 		if _, err := os.Stat(bundlePath(p.Tool, p.Name)); err == nil {
 			p.Name = uniqueProfileName(p.Tool, orig, p.Account)
@@ -206,17 +298,7 @@ func cmdImport(args []string) {
 		fmt.Printf("add    %s/%s  (%s)\n", p.Tool, p.Name, orDash(p.Account))
 		added++
 	}
-
-	fmt.Printf("\nimport done: %d added, %d already present (kept).\n", added, kept)
-
-	for tool, name := range activate {
-		resolved := resolveName(tool, name)
-		fmt.Printf("activating %s -> %s\n", tool, resolved)
-		cmdUse(tool, resolved)
-	}
-	if len(activate) == 0 {
-		fmt.Println("nothing was applied to the system; run `am use <tool> <name>` to switch to one.")
-	}
+	return added
 }
 
 func readExportBlob(r io.Reader) string {
