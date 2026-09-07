@@ -37,23 +37,20 @@ func usage() {
 	fmt.Print(`am - AI CLI account manager
 
 Setup (once):
-  am save claude            snapshot each account you want in rotation
-                            (log into the next one in Claude, run again)
-  am hook install           wire the proxy to Claude Code's start/stop hooks
-                            and add ANTHROPIC_BASE_URL to your shell rc
+  am add                    save the account you're logged into; run again
+                            after logging into each other account you want
+  am hook install           make Claude Code start/stop the proxy, and add
+                            ANTHROPIC_BASE_URL to your shell rc
 
-After that use 'claude' normally. The proxy starts with your first session,
-swaps to another account before a rate limit stops you (no restart), and
-stops itself when the last session ends.
+Then use 'claude' normally. The proxy starts with your first session, swaps
+account before a rate limit stops you (no restart), and stops when the last
+session ends.
 
-  am ls [tool]              list saved profiles (and which is active)
-  am current [tool]         show the account each tool is logged in as
-  am status                 proxy state: active account, limits, switches
-  am save <tool> [name]     snapshot current login (name defaults to the email)
-  am use    <tool> <name>   restore a profile on disk
-  am switch <tool> <name>   switch account now — no restart
-  am rm   <tool> <name>     delete a profile
-  am add  <tool> <name>     log in fresh, then 'am save'
+  am add [tool]             save an account into a profile   (default: claude)
+  am ls [tool]              list saved profiles
+  am rm [tool] <name>       delete a profile
+  am switch [tool] <name>   use another account now — no restart
+  am status                 what's active, rate limits, switch count
 
   am hook install|uninstall|status
   am proxy                  run the proxy in the foreground (normally automatic)
@@ -61,8 +58,9 @@ stops itself when the last session ends.
   am export [tool] [name..] encrypted blob of profiles for another machine
   am import [--file f] [--activate tool=name]
 
-tools: claude (proxy rotation), codex, gemini (profile swap only)
-profiles are encrypted with a master key held in the macOS Keychain.
+<name> matches an exact profile name or a unique part of it / the email.
+tools: claude (auto-rotated), codex, gemini (switch writes to disk; restart
+the tool). Profiles are encrypted with a key in the macOS Keychain.
 `)
 }
 
@@ -73,31 +71,24 @@ func main() {
 		return
 	}
 	switch args[0] {
+	case "a", "add":
+		cmdAdd(toolArg(args, 1))
 	case "ls", "list":
 		cmdLs(args[1:])
-	case "current", "now", "who":
-		cmdNow(args[1:])
-	case "save":
+	case "rm", "remove":
 		need(args, 2)
-		cmdSave(args[1], arg(args, 2)) // name optional -> account/email
-	case "use":
-		need(args, 3)
-		cmdUse(args[1], resolveName(args[1], args[2]))
+		tool, name := toolAndName(args[1:])
+		cmdRm(tool, resolveName(tool, name))
 	case "switch", "sw":
-		need(args, 3)
-		cmdSwitch(args[1], resolveName(args[1], args[2]))
-	case "rm", "delete":
-		need(args, 3)
-		cmdRm(args[1], resolveName(args[1], args[2]))
-	case "add":
-		need(args, 3)
-		cmdAdd(args[1], args[2])
+		need(args, 2)
+		tool, name := toolAndName(args[1:])
+		cmdSwitch(tool, resolveName(tool, name))
+	case "status", "st":
+		cmdStatus()
 	case "hook":
 		cmdHook(args[1:])
 	case "proxy":
 		cmdProxy(args[1:])
-	case "status", "st":
-		cmdStatus()
 	case "export":
 		cmdExport(args[1:])
 	case "import":
@@ -109,18 +100,33 @@ func main() {
 	}
 }
 
+// toolArg returns args[i] if it names a known tool, else "claude".
+func toolArg(args []string, i int) string {
+	if i < len(args) {
+		if _, ok := loadConfig().Tools[args[i]]; ok {
+			return args[i]
+		}
+	}
+	return "claude"
+}
+
+// toolAndName parses "[tool] <name>": if the first arg is a known tool the rest
+// is the name, otherwise the tool defaults to claude and all of it is the name.
+func toolAndName(rest []string) (tool, name string) {
+	if len(rest) >= 2 {
+		if _, ok := loadConfig().Tools[rest[0]]; ok {
+			return rest[0], strings.Join(rest[1:], " ")
+		}
+	}
+	return "claude", strings.Join(rest, " ")
+}
+
 func need(args []string, n int) {
 	if len(args) < n {
 		die("not enough arguments (try: am help)")
 	}
 }
 
-func arg(args []string, i int) string {
-	if i < len(args) {
-		return args[i]
-	}
-	return ""
-}
 
 // resolveName lets the user pass a partial profile name (or the account's
 // email / id). Exact match wins; otherwise a unique case-insensitive substring
@@ -195,27 +201,54 @@ func cmdLs(args []string) {
 	w.Flush()
 }
 
-func cmdNow(args []string) {
-	c := loadConfig()
-	tools := toolNames(c)
-	if len(args) > 0 {
-		tools = []string{args[0]}
-	}
+// printLiveLogins shows the account each tool is currently logged in as (read
+// straight from its credential on disk). Used by `am status` when the proxy
+// isn't running.
+func printLiveLogins() {
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "TOOL\tLOGGED IN AS\tMATCHES PROFILE")
-	for _, tn := range tools {
+	fmt.Fprintln(w, "TOOL\tLOGGED IN AS\tSAVED PROFILE")
+	for _, tn := range toolNames(loadConfig()) {
 		acct := detectAccount(toolSpec(tn))
-		match := matchProfileByAccount(tn, acct)
-		fmt.Fprintf(w, "%s\t%s\t%s\n", tn, orDash(acct), orDash(match))
+		fmt.Fprintf(w, "%s\t%s\t%s\n", tn, orDash(acct), orDash(matchProfileByAccount(tn, acct)))
 	}
 	w.Flush()
 }
 
-func cmdAdd(tool, name string) {
-	fmt.Printf(`Log in to %s now in another terminal (its normal login flow), then press Enter.
-`, tool)
+// cmdAdd captures an account into a profile. If that account is already the one
+// logged in, it snapshots it straight away; otherwise it walks you through
+// logging into the new account first (the CLIs need a browser for that).
+func cmdAdd(tool string) {
+	if acct := detectAccount(toolSpec(tool)); acct != "" && profileNameForAccount(tool, acct) == "" {
+		fmt.Printf("%s is logged in as %s — saving that.\n", tool, acct)
+		cmdSave(tool, sanitizeName(acct))
+		fmt.Printf("\nto add a different account: log into it in %s, then run `am add %s` again.\n", tool, tool)
+		return
+	}
+	loginHint(tool)
+	fmt.Print("press Enter when you've logged in as the new account… ")
 	fmt.Scanln()
-	cmdSave(tool, name)
+	acct := detectAccount(toolSpec(tool))
+	if acct == "" {
+		die("still can't detect a %s login", tool)
+	}
+	if existing := profileNameForAccount(tool, acct); existing != "" {
+		fmt.Printf("%s is already saved as %q — nothing to do.\n", acct, existing)
+		return
+	}
+	cmdSave(tool, sanitizeName(acct))
+}
+
+func loginHint(tool string) {
+	switch tool {
+	case "claude":
+		fmt.Println("in another terminal: `claude` → /login → sign in as the new account")
+	case "codex":
+		fmt.Println("in another terminal: `codex login` (after `codex logout` if needed)")
+	case "gemini":
+		fmt.Println("in another terminal: `gemini` → /auth → sign in as the new account")
+	default:
+		fmt.Printf("log into %s as the new account\n", tool)
+	}
 }
 
 func orDash(s string) string {

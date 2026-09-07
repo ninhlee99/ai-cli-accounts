@@ -492,7 +492,8 @@ func parseFirstTime(h http.Header, keys ...string) time.Time {
 // account, since the proxy serves that account's token to every request.
 func cmdStatus() {
 	if !proxyUp() {
-		fmt.Println("proxy not running (starts automatically when you launch claude).")
+		fmt.Print("proxy not running (it starts automatically when you launch claude)\n\n")
+		printLiveLogins()
 		return
 	}
 	resp, err := http.Get(proxyBase() + "/_am/status")

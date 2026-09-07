@@ -24,34 +24,25 @@ mv am /usr/local/bin/
 
 macOS only (uses the `security` keychain CLI). Needs Go 1.22+.
 
-## Profile management
+## Profiles
 
 ```sh
-am current                   # who each tool is logged in as right now
-
-am save claude               # snapshot current login; profile name = the
-                             # account email, e.g. "you@gmail.com"
-am save claude work          # ...or give it your own name
-am ls                        # list profiles + their account, * = active
-
-am use claude you@gmail.com  # restore a profile on disk
-am use claude you            # partial name is fine if it's unambiguous
-am switch claude work        # switch account now — live via the proxy, no restart
-am rm claude work
+am add                       # save whatever account you're logged into now
+                             # (log into another one, run again to add it)
+am add codex                 # same for codex / gemini
+am ls                        # list profiles, * = active
+am switch you@gmail.com      # use another account now (see below)
+am rm you@gmail.com
+am status                    # active account + rate limits
 ```
 
-`am save` reads the logged-in account from each CLI's own token (Claude/Codex/
-Gemini all expose an email), so you rarely have to name profiles yourself.
-`am use` / `am switch` / `am rm` accept an exact name, or a unique substring of
-the name or the account email.
+The profile name is the account's email — read from the CLI's own token, so
+you never type it. `am switch` / `am rm` take an exact name or a unique part
+of it.
 
-`am use` auto-snapshots the current (unsaved) login as `_prev` first, so nothing
-is ever lost.
-
-Profiles live in `~/.am/profiles/<tool>/<name>.amp`, encrypted with AES-256-GCM.
-The master key is generated once and stored in the macOS Keychain
-(`am-master-key`). The cleartext `*.meta.json` sidecar holds only the account
-name and timestamp — no secrets.
+Profiles live in `~/.am/profiles/<tool>/<name>.amp`, encrypted with AES-256-GCM
+under a key stored in the macOS Keychain (`am-master-key`). The `*.meta.json`
+sidecar next to each is cleartext but holds only the email and a timestamp.
 
 ## Move accounts to another machine
 
@@ -73,7 +64,7 @@ On the target machine:
 ```sh
 am import                    # paste the AMEXP1.… line, then Ctrl-D
 am import -f blob.txt         # ...or read it from a file
-am import --activate claude=you@gmail.com   # also `am use` it after import
+am import --activate claude=you@gmail.com   # also `am switch` to it after import
 ```
 
 Merge rules:
@@ -86,7 +77,7 @@ Merge rules:
 - everything else → added.
 
 Import only writes to `~/.am`. It does not touch the live keychain / config
-files until you `am use` (or pass `--activate`). Pre-existing profiles always
+files until you `am switch` (or pass `--activate`). Pre-existing profiles always
 remain in the list.
 
 Non-interactive: set `AM_PASSPHRASE` instead of being prompted.
@@ -107,8 +98,8 @@ Set it up once, then use plain `claude`. Nothing changes about how you launch
 it — no wrapper.
 
 ```sh
-am save claude               # snapshot each account (log into the next one
-am save claude               #   in Claude, run again) — 2+ for rotation
+am add                       # save the account you're on (repeat per account,
+                             #   2+ for rotation)
 am hook install              # wires Claude Code's start/stop hooks + adds
                              # ANTHROPIC_BASE_URL to your shell rc
 # open a new shell, then:
@@ -167,7 +158,8 @@ of this applies.
 - The account view in Claude Code still says "API Usage Billing" is **not**
   expected here — if you see it, `ANTHROPIC_AUTH_TOKEN` is set in your
   environment; unset it.
-- Codex / Gemini have no proxy rotation (profile save / use / switch work).
+- Codex / Gemini have no proxy rotation. `am add` / `am switch` still work;
+  `am switch` there writes the credential to disk, so restart the tool.
 
 ## Layout
 
