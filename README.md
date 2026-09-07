@@ -36,13 +36,24 @@ background service beyond what a live Claude Code session needs.
 ## Install
 
 ```sh
-git clone <repo>/ai-cli-accounts && cd ai-cli-accounts
+curl -fsSL https://raw.githubusercontent.com/ninhlee99/ai-cli-accounts/main/install.sh | sh
+```
+
+No manual clone. The script clones to a temp dir, builds, installs the
+binary to `/usr/local/bin` (asks for `sudo` only if that isn't writable),
+runs `am setup` (hook + `/am:feedback`, see below), and cleans up after
+itself. Needs **macOS** (`am` uses the `security` keychain CLI), **Go
+1.22+**, and **git** already on your machine — it errors out with a clear
+message if one's missing rather than doing anything partial.
+
+Prefer to see the code first, or want to build by hand:
+
+```sh
+git clone https://github.com/ninhlee99/ai-cli-accounts.git && cd ai-cli-accounts
 go build -o am .
 mv am /usr/local/bin/
 am setup                     # hook + /am:feedback, installed globally (see below)
 ```
-
-macOS only (uses the `security` keychain CLI). Needs Go 1.22+.
 
 `am setup` does everything `am hook install` does (see [Auto-rotating
 proxy](#auto-rotating-proxy-claude)), plus installs the `/am:feedback` slash
@@ -59,17 +70,24 @@ am help                      # prints usage if the binary is on PATH
 ## Update
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/ninhlee99/ai-cli-accounts/main/install.sh | sh
+```
+
+Re-running the installer is the update — it always builds fresh from
+`main` and overwrites the existing binary. Or, if you built by hand:
+
+```sh
 cd ai-cli-accounts
 git pull
 go build -o am .
 mv am /usr/local/bin/
 ```
 
-Rebuilding overwrites the binary; profiles in `~/.am` are untouched. No need
-to re-run `am setup` / `am hook install` after an update — they only wire
-shell rc, Claude Code settings, and the slash command once, and those still
-point at the same `am` binary. Re-run `am setup` only if you want to pick up
-a newer `/am:feedback` command definition.
+Either way, profiles in `~/.am` are untouched. No need to re-run `am setup`
+/ `am hook install` after an update — they only wire shell rc, Claude Code
+settings, and the slash command once, and those still point at the same
+`am` binary. Re-run `am setup` by hand only if you want to pick up a newer
+`/am:feedback` command definition without a full reinstall.
 
 ## Uninstall
 
@@ -319,3 +337,4 @@ same command, and works from Claude Code in any project, not just this repo.
 | `setup.go`            | `am setup` — hook install + global slash-command install |
 | `commands/feedback.md` | source for `/am:feedback`, embedded into the binary at build time |
 | `.claude/commands/am/feedback.md` | same file, kept here too so `/am:feedback` also works when Claude Code runs inside this repo pre-install |
+| `install.sh`          | `curl \| sh` installer — clone to temp dir, build, install, `am setup` |
