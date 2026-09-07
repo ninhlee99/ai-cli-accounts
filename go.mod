@@ -1,4 +1,4 @@
-module github.com/ninhle21199/acctmgr
+module acctmgr
 
 go 1.22
 
