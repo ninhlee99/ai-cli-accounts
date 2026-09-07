@@ -76,6 +76,15 @@ func cmdProxy(args []string) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(rot.status())
 	})
+	mux.HandleFunc("/_am/switch", func(w http.ResponseWriter, r *http.Request) {
+		name := r.URL.Query().Get("to")
+		if err := rot.forceSwitch(name); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"active": rot.active()})
+	})
 	mux.Handle("/", rp)
 
 	fmt.Printf("am proxy on http://%s -> %s\n", addr, upstream)
@@ -256,6 +265,34 @@ func (r *rotator) rotate(from, reason string) {
 	log.Printf("ROTATE (%s): %s -> (all accounts cooling down; staying)", reason, from)
 }
 
+// forceSwitch makes the named profile active immediately (next request uses it).
+// Empty name = advance to the next profile in rotation order.
+func (r *rotator) forceSwitch(name string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if name == "" {
+		r.idx = (r.idx + 1) % len(r.order)
+	} else {
+		found := -1
+		for i, n := range r.order {
+			if n == name {
+				found = i
+			}
+		}
+		if found < 0 {
+			return fmt.Errorf("no profile %q (have: %s)", name, strings.Join(r.order, ", "))
+		}
+		r.idx = found
+	}
+	target := r.order[r.idx]
+	delete(r.cooldown, target) // manual switch clears any cooldown on the target
+	r.switches++
+	r.lastSwitch = time.Now()
+	writeActivePointer(r.tool, target)
+	log.Printf("MANUAL SWITCH -> %s", target)
+	return nil
+}
+
 func (r *rotator) status() map[string]any {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -312,6 +349,32 @@ func parseFirstTime(h http.Header, keys ...string) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+// cmdSwitch changes the active account. If the proxy is running it switches the
+// proxy live (a running `claude` keeps going, next request uses the new
+// account). Otherwise it falls back to a disk swap (am use).
+func cmdSwitch(tool, name string) {
+	if tool != "claude" {
+		cmdUse(tool, name)
+		return
+	}
+	base := "http://" + envOr("AM_PROXY_ADDR", "127.0.0.1:8787")
+	if !proxyUp(base) {
+		fmt.Println("proxy not running; swapping on-disk credentials instead")
+		cmdUse(tool, name)
+		return
+	}
+	resp, err := http.Post(base+"/_am/switch?to="+url.QueryEscape(name), "", nil)
+	if err != nil {
+		die("proxy switch: %v", err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		die("proxy switch: %s", strings.TrimSpace(string(b)))
+	}
+	fmt.Printf("proxy now serving: %s (running claude keeps its session)\n", name)
 }
 
 // cmdRun execs a tool with env pointed at a running proxy.

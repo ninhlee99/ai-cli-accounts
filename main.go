@@ -39,7 +39,9 @@ func usage() {
   am ls [tool]              list saved profiles (and which is active)
   am now [tool]             show the account each tool is currently logged in as
   am save <tool> <name>     snapshot the tool's current login into a profile
-  am use  <tool> <name>     restore a profile (auto-saves current state first)
+  am use    <tool> <name>   restore a profile on disk (auto-saves current first)
+  am switch <tool> <name>   switch account; live via the proxy if it's running,
+                            else same as 'use'
   am rm   <tool> <name>     delete a profile
   am add  <tool> <name>     alias for: log in fresh, then 'am save'
   am proxy [--addr host:port]
@@ -67,9 +69,12 @@ func main() {
 	case "save":
 		need(args, 3)
 		cmdSave(args[1], args[2])
-	case "use", "switch":
+	case "use":
 		need(args, 3)
 		cmdUse(args[1], args[2])
+	case "switch", "sw":
+		need(args, 3)
+		cmdSwitch(args[1], args[2])
 	case "rm", "delete":
 		need(args, 3)
 		cmdRm(args[1], args[2])
