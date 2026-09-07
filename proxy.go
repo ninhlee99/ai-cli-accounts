@@ -10,12 +10,16 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 )
 
 // cmdProxy runs a local reverse proxy in front of api.anthropic.com. It injects
@@ -473,7 +477,94 @@ func runTool(tool string, rest []string, autostart bool) {
 	// credential is the one installed, so the UI shows the right account.
 	ensureActiveCredentialInstalled()
 
-	execProcess(bin, append([]string{tool}, rest...), env)
+	runChildRestoringTerminal(bin, append([]string{tool}, rest...), env)
+}
+
+// runChildRestoringTerminal runs the child sharing our stdio, then repairs the
+// terminal afterwards. TUI apps like Claude Code query the terminal
+// (XTVERSION, Primary Device Attributes, bracketed paste, alt screen…) on
+// startup; if they exit without fully draining the replies, the escape
+// sequences land on the shell prompt. We reset the modes they commonly leave
+// on and consume any late query replies still in the input buffer.
+func runChildRestoringTerminal(bin string, argv, env []string) {
+	cmd := exec.Command(bin, argv[1:]...)
+	cmd.Args = argv
+	cmd.Env = env
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	// Forward signals to the child; it owns the terminal while it runs.
+	sig := make(chan os.Signal, 4)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	if err := cmd.Start(); err != nil {
+		die("start %s: %v", bin, err)
+	}
+	go func() {
+		for s := range sig {
+			if cmd.Process != nil {
+				_ = cmd.Process.Signal(s)
+			}
+		}
+	}()
+	err := cmd.Wait()
+	signal.Stop(sig)
+	close(sig)
+
+	restoreTerminal()
+
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			if ws, ok := ee.Sys().(syscall.WaitStatus); ok {
+				os.Exit(ws.ExitStatus())
+			}
+			os.Exit(1)
+		}
+		die("%s: %v", bin, err)
+	}
+}
+
+func restoreTerminal() {
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		return
+	}
+	// ESC c would hard-reset (clears scrollback); instead undo the specific
+	// modes a TUI typically leaves set:
+	//   [?1049l exit alt screen   [?2004l bracketed paste off
+	//   [?25h   show cursor       [?1000/1002/1003/1006 l  mouse tracking off
+	//   [?7h    autowrap on       [0m     reset SGR
+	fmt.Fprint(os.Stdout, "\x1b[?1049l\x1b[?2004l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?7h\x1b[0m")
+
+	// Drain any device-report replies (XTVERSION DCS, DA1 `…c`, cursor pos
+	// `…R`) still sitting in stdin, so they don't print at the next prompt.
+	drainStdin(60 * time.Millisecond)
+}
+
+func drainStdin(window time.Duration) {
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return
+	}
+	old, err := term.MakeRaw(fd)
+	if err != nil {
+		return
+	}
+	defer term.Restore(fd, old)
+
+	buf := make([]byte, 512)
+	deadline := time.Now().Add(window)
+	for time.Now().Before(deadline) {
+		// poll(2): is there anything to read within 20ms?
+		pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		n, perr := unix.Poll(pfd, 20)
+		if perr != nil || n == 0 {
+			continue
+		}
+		if _, rerr := unix.Read(fd, buf); rerr != nil {
+			return
+		}
+		deadline = time.Now().Add(window) // reset while bytes keep coming
+	}
 }
 
 // ensureActiveCredentialInstalled restores the proxy's active profile onto the
