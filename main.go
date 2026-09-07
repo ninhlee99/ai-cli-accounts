@@ -38,7 +38,8 @@ func usage() {
 
   am ls [tool]              list saved profiles (and which is active)
   am now [tool]             show the account each tool is currently logged in as
-  am save <tool> <name>     snapshot the tool's current login into a profile
+  am save <tool> [name]     snapshot the current login (name defaults to the
+                            account email, e.g. you@gmail.com)
   am use    <tool> <name>   restore a profile on disk (auto-saves current first)
   am switch <tool> <name>   switch account; live via the proxy if it's running,
                             else same as 'use'
@@ -67,17 +68,17 @@ func main() {
 	case "now", "current":
 		cmdNow(args[1:])
 	case "save":
-		need(args, 3)
-		cmdSave(args[1], args[2])
+		need(args, 2)
+		cmdSave(args[1], arg(args, 2)) // name optional -> account/email
 	case "use":
 		need(args, 3)
-		cmdUse(args[1], args[2])
+		cmdUse(args[1], resolveName(args[1], args[2]))
 	case "switch", "sw":
 		need(args, 3)
-		cmdSwitch(args[1], args[2])
+		cmdSwitch(args[1], resolveName(args[1], args[2]))
 	case "rm", "delete":
 		need(args, 3)
-		cmdRm(args[1], args[2])
+		cmdRm(args[1], resolveName(args[1], args[2]))
 	case "add":
 		need(args, 3)
 		cmdAdd(args[1], args[2])
@@ -100,6 +101,42 @@ func need(args []string, n int) {
 	if len(args) < n {
 		die("not enough arguments (try: am help)")
 	}
+}
+
+func arg(args []string, i int) string {
+	if i < len(args) {
+		return args[i]
+	}
+	return ""
+}
+
+// resolveName lets the user pass a partial profile name (or the account's
+// email / id). Exact match wins; otherwise a unique case-insensitive substring
+// match of the profile name or its account. Ambiguous or missing -> error.
+func resolveName(tool, q string) string {
+	profs := listProfiles(tool)
+	for _, p := range profs {
+		if p.Name == q {
+			return q
+		}
+	}
+	ql := strings.ToLower(q)
+	var hits []string
+	for _, p := range profs {
+		if strings.Contains(strings.ToLower(p.Name), ql) ||
+			(p.Account != "" && strings.Contains(strings.ToLower(p.Account), ql)) {
+			hits = append(hits, p.Name)
+		}
+	}
+	switch len(hits) {
+	case 1:
+		return hits[0]
+	case 0:
+		die("no %s profile matching %q (see: am ls %s)", tool, q, tool)
+	default:
+		die("%q matches %d %s profiles: %s", q, len(hits), tool, strings.Join(hits, ", "))
+	}
+	return q
 }
 
 func toolSpec(name string) ToolSpec {

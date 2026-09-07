@@ -28,13 +28,22 @@ macOS only (uses the `security` keychain CLI). Needs Go 1.22+.
 
 ```sh
 am now                       # who each tool is logged in as right now
-am save claude work          # snapshot current Claude login -> profile "work"
-am save claude personal      # (switch account in Claude's own flow first)
-am ls                        # list profiles, * marks the active one
-am use claude personal       # restore that profile on disk
-am switch claude personal     # switch account (live via proxy if running, else = use)
+
+am save claude               # snapshot current login; profile name = the
+                             # account email, e.g. "you@gmail.com"
+am save claude work          # ...or give it your own name
+am ls                        # list profiles + their account, * = active
+
+am use claude you@gmail.com  # restore a profile on disk
+am use claude you            # partial name is fine if it's unambiguous
+am switch claude work        # switch account (live via proxy if running, else = use)
 am rm claude work
 ```
+
+`am save` reads the logged-in account from each CLI's own token (Claude/Codex/
+Gemini all expose an email), so you rarely have to name profiles yourself.
+`am use` / `am switch` / `am rm` accept an exact name, or a unique substring of
+the name or the account email.
 
 `am use` auto-snapshots the current (unsaved) login as `_prev` first, so nothing
 is ever lost.

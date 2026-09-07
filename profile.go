@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -71,6 +72,15 @@ func listProfiles(tool string) []profileMeta {
 	return out
 }
 
+// sanitizeName keeps a profile name filesystem-safe (email local+domain ok,
+// drop path separators and whitespace).
+func sanitizeName(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "/", "-")
+	s = strings.ReplaceAll(s, " ", "-")
+	return s
+}
+
 func matchProfileByAccount(tool, account string) string {
 	if account == "" {
 		return ""
@@ -133,6 +143,10 @@ func applyEntry(e entry) error {
 	}
 }
 
+// detectAccount returns a human-readable account label (usually an email).
+// An artifact's AccountField is a dotted JSON path; if it is prefixed with
+// "jwt:" the value at that path is treated as a JWT and the claim after the
+// next ":" is read from its payload, e.g. "jwt:tokens.id_token:email".
 func detectAccount(t ToolSpec) string {
 	for _, a := range t.Artifacts {
 		if a.AccountField == "" {
@@ -146,11 +160,43 @@ func detectAccount(t ToolSpec) string {
 		if json.Unmarshal(e.Data, &doc) != nil {
 			continue
 		}
-		if v := digJSON(doc, a.AccountField); v != "" {
+		field := a.AccountField
+		if strings.HasPrefix(field, "jwt:") {
+			rest := strings.TrimPrefix(field, "jwt:")
+			path, claim, ok := strings.Cut(rest, ":")
+			if !ok {
+				continue
+			}
+			if v := jwtClaim(digJSON(doc, path), claim); v != "" {
+				return v
+			}
+			continue
+		}
+		if v := digJSON(doc, field); v != "" {
 			return v
 		}
 	}
 	return ""
+}
+
+func jwtClaim(tokenStr, claim string) string {
+	parts := strings.Split(tokenStr, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	p := parts[1]
+	if m := len(p) % 4; m != 0 {
+		p += strings.Repeat("=", 4-m)
+	}
+	raw, err := base64.URLEncoding.DecodeString(p)
+	if err != nil {
+		return ""
+	}
+	var doc map[string]any
+	if json.Unmarshal(raw, &doc) != nil {
+		return ""
+	}
+	return digJSON(doc, claim)
 }
 
 func digJSON(doc map[string]any, dotted string) string {
@@ -215,6 +261,12 @@ func unpackEntries(raw []byte) []entry {
 
 func cmdSave(tool, name string) {
 	t := toolSpec(tool)
+	if name == "" {
+		name = sanitizeName(detectAccount(t))
+		if name == "" {
+			die("could not detect the %s account; pass a name: am save %s <name>", tool, tool)
+		}
+	}
 	var entries []entry
 	for _, a := range t.Artifacts {
 		e, err := captureArtifact(a)

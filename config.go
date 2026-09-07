@@ -42,10 +42,10 @@ func defaultConfig() Config {
 			{Kind: "file", Path: j(".claude/.credentials.json"), Optional: true},
 		}},
 		"codex": {Name: "codex", Artifacts: []Artifact{
-			{Kind: "file", Path: j(".codex/auth.json"), AccountField: "tokens.account_id"},
+			{Kind: "file", Path: j(".codex/auth.json"), AccountField: "jwt:tokens.id_token:email"},
 		}},
 		"gemini": {Name: "gemini", Artifacts: []Artifact{
-			{Kind: "file", Path: j(".gemini/oauth_creds.json"), Optional: true},
+			{Kind: "file", Path: j(".gemini/oauth_creds.json"), Optional: true, AccountField: "jwt:id_token:email"},
 			{Kind: "file", Path: j(".gemini/google_accounts.json"), Optional: true, AccountField: "active"},
 			{Kind: "file", Path: j(".gemini/installation_id"), Optional: true},
 		}},
