@@ -18,7 +18,7 @@ type Artifact struct {
 	// Optional means a missing artifact is not an error when saving.
 	Optional bool `json:"optional,omitempty"`
 	// AccountField is a dotted path into a JSON file whose value names the
-	// logged-in account (used by `acctmgr current`). Only meaningful for files.
+	// logged-in account (used by `am now`). Only meaningful for files.
 	AccountField string `json:"accountField,omitempty"`
 }
 

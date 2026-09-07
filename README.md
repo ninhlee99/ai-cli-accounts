@@ -31,7 +31,8 @@ am now                       # who each tool is logged in as right now
 am save claude work          # snapshot current Claude login -> profile "work"
 am save claude personal      # (switch account in Claude's own flow first)
 am ls                        # list profiles, * marks the active one
-am use claude personal       # restore that profile
+am use claude personal       # restore that profile on disk
+am switch claude personal     # switch account (live via proxy if running, else = use)
 am rm claude work
 ```
 
@@ -58,14 +59,21 @@ Edit `~/.am/config.json` to add paths or tools.
 Requires **2+ saved Claude profiles**.
 
 ```sh
-am proxy                     # runs on 127.0.0.1:8787
-# in another shell:
-am run claude                # execs `claude` with env pointed at the proxy
-#   ...or set it yourself:
+am up claude                 # one command: starts the proxy in the background
+                             # (if not already up), then execs claude through it
+
+# or run the two halves yourself:
+am proxy                     # foreground, on 127.0.0.1:8787
+am run claude                # in another shell; needs the proxy already running
+
+# or wire the env by hand:
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
 export ANTHROPIC_AUTH_TOKEN=am-proxy
 claude
 ```
+
+While the proxy runs: `am switch claude <name>` forces the next request onto
+that account without stopping your session. `pkill -f "am proxy"` stops it.
 
 The proxy:
 
