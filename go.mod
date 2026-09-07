@@ -1,4 +1,4 @@
-module acctmgr
+module ai-cli-accounts
 
 go 1.22
 

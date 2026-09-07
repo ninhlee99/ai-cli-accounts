@@ -1,4 +1,4 @@
-// Command am (module acctmgr) snapshots and swaps the local login state
+// Command am (project ai-cli-accounts) snapshots and swaps the local login state
 // of AI CLIs (Claude Code, Codex, Gemini), and can run a local proxy that
 // rotates Claude accounts automatically before a rate limit interrupts work.
 package main
