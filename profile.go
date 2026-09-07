@@ -391,6 +391,40 @@ func cmdRm(tool, name string) {
 	fmt.Printf("moved to trash — restore with: am restore %s\n", name)
 }
 
+// cmdRename gives a profile a new name — e.g. swap an email-derived name like
+// "you@gmail.com" for something shorter like "work". Renaming the active
+// profile keeps it active under the new name.
+func cmdRename(tool, name, newName string) {
+	if _, err := os.Stat(bundlePath(tool, name)); err != nil {
+		die("no profile %s/%s (see: am ls %s)", tool, name, tool)
+	}
+	newName = sanitizeName(newName)
+	if newName == "" {
+		die("new name can't be empty")
+	}
+	if newName == name {
+		fmt.Println("already named that.")
+		return
+	}
+	if _, err := os.Stat(bundlePath(tool, newName)); err == nil {
+		die("%s/%s already exists", tool, newName)
+	}
+	if err := os.Rename(bundlePath(tool, name), bundlePath(tool, newName)); err != nil {
+		die("rename: %v", err)
+	}
+	m := readMeta(tool, name)
+	m.Name = newName
+	mb, _ := json.MarshalIndent(m, "", "  ")
+	_ = os.Remove(metaPath(tool, name))
+	if err := writeFileAtomic(metaPath(tool, newName), mb, 0o600); err != nil {
+		die("write meta: %v", err)
+	}
+	if readActivePointer(tool) == name {
+		writeActivePointer(tool, newName)
+	}
+	fmt.Printf("renamed %s/%s -> %s\n", tool, name, newName)
+}
+
 // cmdRestore recovers the most recently trashed profile matching q (a name or
 // substring), for the given tool.
 func cmdRestore(tool, q string) {

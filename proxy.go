@@ -116,6 +116,15 @@ func runProxyForeground(args []string) {
 		}
 		fmt.Fprintf(w, "%d\n", life.sessions())
 	})
+	// SessionStart hits this on every `claude` launch, not just the one that
+	// spawned the proxy — so a login done since the proxy came up (e.g. logged
+	// into a second account, then opened a new claude tab) gets snapshotted
+	// and pulled into rotation without needing `am add` or a proxy restart.
+	mux.HandleFunc("/_am/sync", func(w http.ResponseWriter, r *http.Request) {
+		syncActiveFromSystem("claude")
+		rot.refreshFromDisk()
+		fmt.Fprintf(w, "%d\n", len(rot.names()))
+	})
 
 	srv := &http.Server{Addr: addr, Handler: withProxy(mux, rp)}
 	go life.watch(srv)
@@ -249,6 +258,27 @@ func (r *rotator) load() {
 				r.idx = i
 			}
 		}
+	}
+}
+
+// refreshFromDisk picks up any profile saved since load() (e.g. a fresh `am
+// add`, or a new login just snapshotted by syncActiveFromSystem) without
+// disturbing in-memory rotation state (idx, cooldown, switch count) for
+// profiles it already knew about.
+func (r *rotator) refreshFromDisk() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	known := map[string]bool{}
+	for _, n := range r.order {
+		known[n] = true
+	}
+	for _, p := range listProfiles(r.tool) {
+		if known[p.Name] {
+			continue
+		}
+		r.order = append(r.order, p.Name)
+		r.tokens[p.Name] = loadClaudeToken(r.tool, p.Name)
+		r.accounts[p.Name] = p.Account
 	}
 }
 
@@ -588,6 +618,7 @@ func proxyEnsureUp() {
 			return
 		}
 	}
+	_, _ = http.Post(proxyBase()+"/_am/sync", "", nil)
 	_, _ = http.Post(proxyBase()+"/_am/session?op=start", "", nil)
 }
 

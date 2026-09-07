@@ -38,18 +38,20 @@ func usage() {
 	fmt.Print(`am - AI CLI account manager
 
 Setup (once):
+  am setup                  do it all: hook install + /am:feedback slash
+                            command, installed globally (any project)
   am add                    save the account you're logged into; run again
                             after logging into each other account you want
-  am hook install           make Claude Code start/stop the proxy, and add
-                            ANTHROPIC_BASE_URL to your shell rc
 
 Then use 'claude' normally. The proxy starts with your first session, swaps
 account before a rate limit stops you (no restart), and stops when the last
 session ends.
 
-  am add [tool]             save an account into a profile   (default: claude)
+  am add [tool] [name]      save an account into a profile   (default tool:
+                            claude, default name: the account email)
   am ls [tool]              list profiles with their IDs (claude1, claude2, …)
   am rm <id|name>           move a profile to the trash (asks first)
+  am rename <id|name> <new> give a profile a shorter/custom name (e.g. "work")
   am restore <id|name>      bring a trashed profile back
   am restore --backup       re-import the latest auto-backup (after every add)
   am sw                     pick an account from a menu (↑/↓, Enter)
@@ -59,8 +61,10 @@ session ends.
   am hook install|uninstall|status
   am proxy                  run the proxy in the foreground (normally automatic)
 
-  am export [tool] [name..] encrypted blob of profiles for another machine
-  am import [--file f] [--activate tool=name]
+  am export [tool] [name..] [-o file|--stdout]   encrypted blob (default: timestamped file)
+  am import [-f file] [--activate tool=name]
+
+  am feedback [-b|--bug|-i|--idea] [title]   file a GitHub issue (bug or idea)
 
 <id|name> is a profile ID (claude1), an exact name, or a unique part of the
 name / email. tools: claude (auto-rotated), codex, gemini (switch writes to
@@ -76,7 +80,8 @@ func main() {
 	}
 	switch args[0] {
 	case "a", "add":
-		cmdAdd(toolArg(args, 1))
+		tool, name := toolAndName(args[1:])
+		cmdAdd(tool, name)
 	case "ls", "list":
 		cmdLs(args[1:])
 	case "rm", "remove":
@@ -85,6 +90,16 @@ func main() {
 			die("usage: am rm [tool] <name>   (name, ID, or part of the email)")
 		}
 		cmdRm(tool, resolveName(tool, name))
+	case "rename", "mv":
+		if len(args) < 3 {
+			die("usage: am rename [tool] <id|name> <new-name>")
+		}
+		tool, name := toolAndName(args[1 : len(args)-1])
+		newName := args[len(args)-1]
+		if name == "" {
+			die("usage: am rename [tool] <id|name> <new-name>")
+		}
+		cmdRename(tool, resolveName(tool, name), newName)
 	case "switch", "sw":
 		tool, name := toolAndName(args[1:])
 		if name == "" {
@@ -113,21 +128,15 @@ func main() {
 		cmdExport(args[1:])
 	case "import":
 		cmdImport(args[1:])
+	case "feedback":
+		cmdFeedback(args[1:])
+	case "setup":
+		cmdSetup(args[1:])
 	case "-h", "--help", "help":
 		usage()
 	default:
 		die("unknown command %q (try: am help)", args[0])
 	}
-}
-
-// toolArg returns args[i] if it names a known tool, else "claude".
-func toolArg(args []string, i int) string {
-	if i < len(args) {
-		if _, ok := loadConfig().Tools[args[i]]; ok {
-			return args[i]
-		}
-	}
-	return "claude"
 }
 
 // toolAndName parses "[tool] [name]". The tool comes from a leading known-tool
@@ -214,12 +223,12 @@ func cmdLs(args []string) {
 		tools = []string{args[0]}
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tACCOUNT\tACTIVE\tSAVED")
+	fmt.Fprintln(w, "ID\tNAME\tACCOUNT\tACTIVE\tSAVED")
 	for _, tn := range tools {
 		active := readActivePointer(tn)
 		profs := listProfiles(tn)
 		if len(profs) == 0 {
-			fmt.Fprintf(w, "%s\t(none — am add %s)\t\t\n", tn, tn)
+			fmt.Fprintf(w, "%s\t(none — am add %s)\t\t\t\n", tn, tn)
 			continue
 		}
 		for _, p := range profs {
@@ -227,7 +236,7 @@ func cmdLs(args []string) {
 			if p.Name == active {
 				mark = "*"
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", p.ID, orDash(p.Account), mark, p.Saved.Format("2006-01-02 15:04"))
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", p.ID, p.Name, orDash(p.Account), mark, p.Saved.Format("2006-01-02 15:04"))
 		}
 	}
 	w.Flush()
@@ -249,10 +258,12 @@ func printLiveLogins() {
 // cmdAdd captures an account into a profile. If that account is already the one
 // logged in, it snapshots it straight away; otherwise it walks you through
 // logging into the new account first (the CLIs need a browser for that).
-func cmdAdd(tool string) {
+// name, if given, is used as the profile name instead of the account email
+// (e.g. `am add work` or `am add codex work`).
+func cmdAdd(tool, name string) {
 	if acct := detectAccount(toolSpec(tool)); acct != "" && profileNameForAccount(tool, acct) == "" {
 		fmt.Printf("%s is logged in as %s — saving that.\n", tool, acct)
-		cmdSave(tool, sanitizeName(acct))
+		cmdSave(tool, profileName(name, acct))
 		fmt.Printf("\nto add a different account: log into it in %s, then run `am add %s` again.\n", tool, tool)
 		return
 	}
@@ -267,7 +278,16 @@ func cmdAdd(tool string) {
 		fmt.Printf("%s is already saved as %q — nothing to do.\n", acct, existing)
 		return
 	}
-	cmdSave(tool, sanitizeName(acct))
+	cmdSave(tool, profileName(name, acct))
+}
+
+// profileName picks the name to save a profile under: the caller-given name
+// if any, else the account email, sanitized either way.
+func profileName(name, acct string) string {
+	if name != "" {
+		return sanitizeName(name)
+	}
+	return sanitizeName(acct)
 }
 
 func loginHint(tool string) {

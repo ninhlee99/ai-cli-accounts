@@ -52,6 +52,13 @@ func deriveKey(pass, salt []byte) []byte {
 	return k
 }
 
+// stdinReader is shared across all readPassphrase (and readExportBlob) calls.
+// A fresh bufio.Reader per call would each read-ahead and buffer whatever the
+// OS handed back from the fd, so a second call could find the underlying fd
+// already drained past its own line — one shared reader keeps the buffering
+// consistent across multiple prompts in the same run.
+var stdinReader = bufio.NewReader(os.Stdin)
+
 func readPassphrase(prompt string) []byte {
 	fmt.Fprint(os.Stderr, prompt)
 	if term.IsTerminal(int(os.Stdin.Fd())) {
@@ -67,19 +74,35 @@ func readPassphrase(prompt string) []byte {
 		fmt.Fprintln(os.Stderr, "(from $AM_PASSPHRASE)")
 		return []byte(v)
 	}
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	line, _ := stdinReader.ReadString('\n')
 	return []byte(strings.TrimRight(line, "\r\n"))
 }
 
 // ---- export ----
 
 func cmdExport(args []string) {
-	// args: [tool] [name ...]   (no args = everything)
-	var wantTool string
+	// args: [tool] [name ...] [-o|--output file|-] [--stdout]   (no args = everything)
+	var wantTool, outPath string
+	toStdout := false
 	wantNames := map[string]bool{}
-	if len(args) > 0 {
-		wantTool = args[0]
-		for _, n := range args[1:] {
+	var rest []string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-o", "--output":
+			i++
+			if i >= len(args) {
+				die("usage: am export ... -o <file>")
+			}
+			outPath = args[i]
+		case "--stdout":
+			toStdout = true
+		default:
+			rest = append(rest, args[i])
+		}
+	}
+	if len(rest) > 0 {
+		wantTool = rest[0]
+		for _, n := range rest[1:] {
 			wantNames[n] = true
 		}
 	}
@@ -96,8 +119,36 @@ func cmdExport(args []string) {
 	}
 
 	blob := sealBundle(bundle, pass, true) // pass = raw passphrase; sealBundle derives
-	fmt.Println(blob)
-	fmt.Fprintf(os.Stderr, "\nexported %d profile(s). Copy the line above to the other machine and run: am import\n", len(bundle.Profiles))
+
+	if toStdout {
+		fmt.Println(blob)
+		fmt.Fprintf(os.Stderr, "\nexported %d profile(s). Copy the line above to the other machine and run: am import\n", len(bundle.Profiles))
+		return
+	}
+
+	if outPath == "" {
+		outPath = defaultExportPath(wantTool, rest)
+	}
+	if err := os.WriteFile(outPath, []byte(blob+"\n"), 0o600); err != nil {
+		die("write %s: %v", outPath, err)
+	}
+	fmt.Fprintf(os.Stderr, "exported %d profile(s) to %s. Copy that file to the other machine and run: am import -f %s\n", len(bundle.Profiles), outPath, filepath.Base(outPath))
+}
+
+// defaultExportPath names the file `am export` writes when -o isn't given:
+// "all-accounts-<timestamp>.amexp" for a full export, "<tool>[-<names>]-<timestamp>.amexp"
+// when scoped. Always timestamped so a repeated export never overwrites an
+// earlier one.
+func defaultExportPath(wantTool string, rest []string) string {
+	stamp := time.Now().Format("20060102-150405")
+	base := "all-accounts"
+	if wantTool != "" {
+		base = wantTool
+		for _, n := range rest[1:] {
+			base += "-" + sanitizeName(n)
+		}
+	}
+	return fmt.Sprintf("%s-%s.amexp", base, stamp)
 }
 
 func collectBundle(wantTool string, wantNames map[string]bool) portableBundle {
