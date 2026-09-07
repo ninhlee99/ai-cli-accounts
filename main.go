@@ -36,8 +36,11 @@ func die(format string, a ...any) {
 func usage() {
 	fmt.Print(`am - AI CLI account manager
 
+  am <tool> [args...]       shortcut for 'am up': run the tool, starting the
+                            proxy first if needed  (e.g. am claude --continue)
+
   am ls [tool]              list saved profiles (and which is active)
-  am now [tool]             show the account each tool is currently logged in as
+  am current [tool]         show the account each tool is currently logged in as
   am save <tool> [name]     snapshot the current login (name defaults to the
                             account email, e.g. you@gmail.com)
   am use    <tool> <name>   restore a profile on disk (auto-saves current first)
@@ -48,8 +51,10 @@ func usage() {
   am proxy [--addr host:port]
                             run the rotating proxy (Claude: auto-switch profile
                             before the rate limit is hit, refresh OAuth tokens)
-  am run  <tool> [args...]  exec the tool with env pointed at a running proxy
-  am up   <tool> [args...]  like 'run', but auto-starts the proxy if needed
+  am run  <tool> [args...]  exec the tool with env pointed at an already-running
+                            proxy (fails if none)
+  am up   <tool> [args...]  run the tool, auto-starting the proxy if needed
+                            (same as the 'am <tool>' shortcut)
 
   am export [tool] [name..] print an encrypted, passphrase-protected blob of
                             profiles to move to another machine
@@ -57,7 +62,7 @@ func usage() {
                             read a blob (stdin or -f) and add profiles that
                             aren't present yet; existing ones are kept as-is
 
-tools: claude, codex, gemini
+tools: claude, codex, gemini   (codex/gemini run directly, no proxy)
 profiles are encrypted with a master key held in the macOS Keychain.
 `)
 }
@@ -68,10 +73,17 @@ func main() {
 		usage()
 		return
 	}
+	// Shortcut: `am claude [args]` == `am up claude [args]` (start proxy if
+	// needed, then exec). Any bare tool name works.
+	if isToolName(args[0]) {
+		cmdUp(args[0], args[1:])
+		return
+	}
+
 	switch args[0] {
 	case "ls", "list":
 		cmdLs(args[1:])
-	case "now", "current":
+	case "current", "now", "who":
 		cmdNow(args[1:])
 	case "save":
 		need(args, 2)
@@ -105,6 +117,11 @@ func main() {
 	default:
 		die("unknown command %q (try: am help)", args[0])
 	}
+}
+
+func isToolName(s string) bool {
+	_, ok := loadConfig().Tools[s]
+	return ok
 }
 
 func need(args []string, n int) {

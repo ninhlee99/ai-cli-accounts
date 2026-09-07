@@ -385,19 +385,26 @@ func cmdRun(tool string, rest []string) { runTool(tool, rest, false) }
 func cmdUp(tool string, rest []string) { runTool(tool, rest, true) }
 
 func runTool(tool string, rest []string, autostart bool) {
+	bin, err := lookPath(tool)
+	if err != nil {
+		die("%v", err)
+	}
+
+	// Only Claude has proxy rotation. Other tools just exec directly — their
+	// CLIs re-read their auth file each run, so `am use` already suffices.
+	if tool != "claude" {
+		execProcess(bin, append([]string{tool}, rest...), os.Environ())
+		return
+	}
+
 	addr := envOr("AM_PROXY_ADDR", "127.0.0.1:8787")
 	base := "http://" + addr
-	env := os.Environ()
-	switch tool {
-	case "claude":
-		env = append(env,
-			"ANTHROPIC_BASE_URL="+base,
-			"ANTHROPIC_AUTH_TOKEN=am-proxy",
-			"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
-		)
-	default:
-		die("only supports: claude")
-	}
+	env := append(os.Environ(),
+		"ANTHROPIC_BASE_URL="+base,
+		"ANTHROPIC_AUTH_TOKEN=am-proxy",
+		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+	)
+
 	if !proxyUp(base) {
 		if !autostart {
 			die("proxy not reachable at %s (start it with: am proxy)", base)
@@ -413,10 +420,6 @@ func runTool(tool string, rest []string, autostart bool) {
 			die("proxy failed to start; see %s", filepath.Join(baseDir(), "proxy.log"))
 		}
 		fmt.Printf("am: proxy started in background (log: %s)\n", filepath.Join(baseDir(), "proxy.log"))
-	}
-	bin, err := lookPath(tool)
-	if err != nil {
-		die("%v", err)
 	}
 	execProcess(bin, append([]string{tool}, rest...), env)
 }
