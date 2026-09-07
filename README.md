@@ -36,7 +36,7 @@ am ls                        # list profiles + their account, * = active
 
 am use claude you@gmail.com  # restore a profile on disk
 am use claude you            # partial name is fine if it's unambiguous
-am switch claude work        # switch account (live via proxy if running, else = use)
+am switch claude work        # switch account now — live via the proxy, no restart
 am rm claude work
 ```
 
@@ -103,74 +103,57 @@ Edit `~/.am/config.json` to add paths or tools.
 
 ## Auto-rotating proxy (Claude)
 
-Set it up once, then use plain `claude` — no wrapper, nothing changes about
-how you launch it.
+Set it up once, then use plain `claude`. Nothing changes about how you launch
+it — no wrapper.
 
 ```sh
-am daemon install            # runs the proxy as a KeepAlive LaunchAgent
-am save claude               # snapshot each account you want (log into the
-am save claude               #   next one in Claude, run again)
-echo 'export ANTHROPIC_BASE_URL=http://127.0.0.1:8787' >> ~/.zshrc
+am save claude               # snapshot each account (log into the next one
+am save claude               #   in Claude, run again) — 2+ for rotation
+am hook install              # wires Claude Code's start/stop hooks + adds
+                             # ANTHROPIC_BASE_URL to your shell rc
 # open a new shell, then:
 claude
 ```
 
-`claude` now talks to the proxy. When the active account nears its limit (or
-gets a 429), the proxy installs the next account's credential and points
-itself there — the running `claude` keeps going and picks up the new account
-on its next keychain read. `/usage` inside Claude Code reports the account
-currently in use, because every request (that one included) carries that
-account's token.
+The proxy is **not a daemon**. Claude Code's `SessionStart` hook starts it
+(the first tab that needs it), `SessionEnd` releases it, and it **stops
+itself ~30s after the last tab closes**. Multiple tabs are ref-counted — as
+long as one Claude session is open, the proxy stays up. If a `claude` process
+dies without its hook firing, the proxy notices the silence and stops within
+30 minutes.
+
+When the active account nears its limit (or gets a 429), the proxy installs
+the next account's credential onto the system and points itself there. The
+running `claude` keeps going and picks up the new account on its next
+keychain read — no restart. `/usage` reports the account in use, because
+every request (that one included) carries its token.
 
 ```sh
 am status                    # active account, limits, switch count
 am switch claude <name>      # force a switch now, no restart
-am daemon status|restart|uninstall
-```
-
-Requires **2+ saved Claude profiles** for rotation. With `ANTHROPIC_BASE_URL`
-unset, `claude` bypasses the proxy entirely and none of this applies.
-
-### The old way (still works)
-
-`am run claude` / `am up claude` set the env for a single run instead of via
-`~/.zshrc`. Not recommended — running claude as a child of `am` can disturb
-its terminal startup.
-
-```sh
-am claude                    # = am up claude: start the proxy if needed,
-                             # then run claude through it
-am claude --continue         # any claude args pass through
-
-# or the pieces:
-am proxy                     # foreground, on 127.0.0.1:8787
-am run claude                # another shell; needs the proxy already up
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8787 && claude   # by hand
+am hook status|uninstall
+am proxy                     # run it in the foreground yourself (rarely needed)
 ```
 
 Only `ANTHROPIC_BASE_URL` is set — **not** `ANTHROPIC_AUTH_TOKEN`. That keeps
-Claude Code in OAuth mode (it still shows your account and bills your
-subscription, not API credit); every request just travels through the proxy.
-
-While the proxy runs: `am switch claude <name>` puts the next request on that
-account without stopping your session. `pkill -f "am proxy"` stops the proxy.
+Claude Code in OAuth mode (account shows in the UI, subscription billing, not
+API credit); requests just travel through the proxy.
 
 How it works:
 
 - **Claude Code owns the OAuth refresh.** Refresh tokens rotate on use, so the
   proxy never refreshes — it reads the live keychain token on each request and
-  forwards that, so it always uses whatever Claude Code last refreshed to.
-- On startup the proxy adopts the account Claude is currently logged in as
-  (snapshotting it as a profile if new).
-- It watches `anthropic-ratelimit-unified-*` headers and **HTTP 429**. When the
-  active account is near its limit (or 429s), it installs the next profile's
-  credential onto the system and points itself there. The in-flight request
-  still completes; the next one is the new account. Claude Code re-reads the
-  keychain within a few minutes (or on a 401) and follows — no restart.
+  forwards that.
+- On startup the proxy adopts the account Claude is logged in as (snapshotting
+  it as a profile if new).
+- It watches `anthropic-ratelimit-unified-*` headers and **HTTP 429**. Near the
+  limit (or on a 429) it installs the next profile's credential and points
+  itself there. In-flight request still completes; the next one is the new
+  account.
 - A limited account goes on cooldown until its reset time, then rotates back.
 
-`GET http://127.0.0.1:8787/_am/status` → per-account: active flag, email,
-last-seen remaining, limit reset, cooldown, total switches.
+With `ANTHROPIC_BASE_URL` unset, `claude` talks straight to Anthropic and none
+of this applies.
 
 ### Limits / honesty
 
@@ -195,6 +178,7 @@ last-seen remaining, limit reset, cooldown, total switches.
 | `profile.go`          | capture / apply / bundle (tar.gz) |
 | `crypto.go`           | AES-GCM, master key in keychain |
 | `keychain_darwin.go`  | `security` CLI wrapper (raw-value safe) |
-| `proxy.go`            | reverse proxy + rotator |
-| `claude_token.go`     | Claude OAuth token: read from keychain / profile bundle |
+| `proxy.go`            | reverse proxy, rotator, auto start/stop lifecycle |
+| `claude_token.go`     | Claude OAuth token: read from keychain / bundle |
+| `hook.go`             | `am hook` — Claude Code SessionStart/End wiring |
 | `transfer.go`         | `am export` / `am import` (passphrase-encrypted bundle) |

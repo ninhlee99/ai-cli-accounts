@@ -18,13 +18,32 @@ import (
 	"time"
 )
 
-// cmdProxy runs a local reverse proxy in front of api.anthropic.com. It injects
-// the OAuth access token of the *active* Claude profile, refreshes that token
-// when it is about to expire, and rotates to the next profile when the current
-// account's unified rate limit is nearly exhausted or returns HTTP 429 — so the
-// client (Claude Code) never sees an interruption mid-task.
+const defaultAddr = "127.0.0.1:8787"
+
+func proxyAddr() string { return envOr("AM_PROXY_ADDR", defaultAddr) }
+func proxyBase() string { return "http://" + proxyAddr() }
+
+// cmdProxy dispatches: `am proxy` runs the reverse proxy in the foreground;
+// `am proxy up` / `am proxy down` are what the Claude Code hooks call to start
+// it on demand and stop it when the last session ends.
 func cmdProxy(args []string) {
-	addr := "127.0.0.1:8787"
+	if len(args) > 0 {
+		switch args[0] {
+		case "up":
+			proxyEnsureUp()
+			return
+		case "down":
+			proxyReleaseAndMaybeStop()
+			return
+		}
+	}
+	runProxyForeground(args)
+}
+
+// runProxyForeground is the actual server. It exits on its own once no Claude
+// session has held it for idleShutdown, so it never lingers after `claude`.
+func runProxyForeground(args []string) {
+	addr := defaultAddr
 	upstream := "https://api.anthropic.com"
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -36,45 +55,38 @@ func cmdProxy(args []string) {
 			upstream = args[i]
 		}
 	}
-	// Whatever account Claude is actually logged in as right now takes
-	// priority: capture it as a profile if it's new, and make it the active
-	// one, so `am claude` always starts on the account you last logged into.
 	syncActiveFromSystem("claude")
 
-	profs := listProfiles("claude")
-	if len(profs) == 0 {
-		die("no claude profiles saved; run `am save claude` (log in first), or `am save claude <name>`")
+	if len(listProfiles("claude")) == 0 {
+		die("no claude profiles saved; log into Claude, then run `am save claude`")
 	}
 
 	rot := &rotator{tool: "claude"}
 	rot.load()
 	if rot.active() == "" {
-		rot.setActive(profs[0].Name)
+		rot.setActive(listProfiles("claude")[0].Name)
 	}
-	fmt.Printf("am proxy: starting on account %q\n", rot.active())
+
+	life := &lifecycle{}
+	life.touch()
 
 	target, _ := url.Parse(upstream)
 	rp := &httputil.ReverseProxy{
 		Director: func(r *http.Request) {
+			life.touch()
 			r.URL.Scheme = target.Scheme
 			r.URL.Host = target.Host
 			r.Host = target.Host
-			tok := rot.token()
-			hadAuth := r.Header.Get("Authorization") != "" || r.Header.Get("X-Api-Key") != ""
-			r.Header.Set("Authorization", "Bearer "+tok)
+			r.Header.Set("Authorization", "Bearer "+rot.token())
 			r.Header.Del("X-Api-Key")
-			if os.Getenv("AM_PROXY_DEBUG") != "" {
-				log.Printf("%s %s  (client sent auth: %v -> using %s)", r.Method, r.URL.Path, hadAuth, rot.active())
-			}
-			// Claude Code's OAuth path expects this beta flag.
 			if !strings.Contains(r.Header.Get("anthropic-beta"), "oauth") {
 				r.Header.Add("anthropic-beta", "oauth-2025-04-20")
 			}
+			if os.Getenv("AM_PROXY_DEBUG") != "" {
+				log.Printf("%s %s -> %s", r.Method, r.URL.Path, rot.active())
+			}
 		},
-		ModifyResponse: func(resp *http.Response) error {
-			rot.observe(resp)
-			return nil
-		},
+		ModifyResponse: func(resp *http.Response) error { rot.observe(resp); return nil },
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Printf("proxy error: %v", err)
 			http.Error(w, "am proxy: upstream error", http.StatusBadGateway)
@@ -84,23 +96,108 @@ func cmdProxy(args []string) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/_am/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(rot.status())
+		_ = json.NewEncoder(w).Encode(rot.status())
 	})
 	mux.HandleFunc("/_am/switch", func(w http.ResponseWriter, r *http.Request) {
-		name := r.URL.Query().Get("to")
-		if err := rot.forceSwitch(name); err != nil {
+		if err := rot.forceSwitch(r.URL.Query().Get("to")); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"active": rot.active()})
+		_ = json.NewEncoder(w).Encode(map[string]string{"active": rot.active()})
 	})
-	mux.Handle("/", rp)
+	// Hooks register/deregister a session; the proxy shuts down shortly after
+	// the count hits zero (grace period covers a quick claude restart).
+	mux.HandleFunc("/_am/session", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("op") {
+		case "start":
+			life.addSession()
+		case "end":
+			life.endSession()
+		}
+		fmt.Fprintf(w, "%d\n", life.sessions())
+	})
 
-	fmt.Printf("am proxy on http://%s -> %s\n", addr, upstream)
-	fmt.Printf("active claude profile: %s   (rotation order: %s)\n", rot.active(), strings.Join(rot.names(), " -> "))
-	fmt.Printf("\npoint Claude Code at it (Claude Code keeps its OAuth identity):\n  export ANTHROPIC_BASE_URL=http://%s\n\n", addr)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	srv := &http.Server{Addr: addr, Handler: withProxy(mux, rp)}
+	go life.watch(srv)
+
+	_ = os.MkdirAll(baseDir(), 0o700)
+	log.Printf("am proxy up on %s, account %q", addr, rot.active())
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
+	log.Printf("am proxy stopped")
+}
+
+func withProxy(mux *http.ServeMux, rp http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/_am/") {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		rp.ServeHTTP(w, r)
+	})
+}
+
+// lifecycle tracks active Claude sessions and the last request time so the
+// proxy can exit when nothing needs it.
+type lifecycle struct {
+	mu       sync.Mutex
+	nSess    int
+	lastSeen time.Time
+}
+
+const (
+	// With no session registered, stop soon after the last request (the grace
+	// covers a quick `claude` restart between SessionEnd and SessionStart).
+	zeroGrace = 30 * time.Second
+	// With a session still registered, only stop if it has made no request for
+	// a long time — that means the `claude` process died without its
+	// SessionEnd hook firing, so the count is stuck. A live but idle tab
+	// (open, not being used) keeps the proxy up.
+	zombieTimeout = 30 * time.Minute
+)
+
+func (l *lifecycle) touch()      { l.mu.Lock(); l.lastSeen = time.Now(); l.mu.Unlock() }
+func (l *lifecycle) addSession() { l.mu.Lock(); l.nSess++; l.lastSeen = time.Now(); l.mu.Unlock() }
+func (l *lifecycle) endSession() {
+	l.mu.Lock()
+	if l.nSess > 0 {
+		l.nSess--
+	}
+	l.lastSeen = time.Now()
+	l.mu.Unlock()
+}
+func (l *lifecycle) sessions() int { l.mu.Lock(); defer l.mu.Unlock(); return l.nSess }
+
+func (l *lifecycle) watch(srv *http.Server) {
+	tick := time.NewTicker(5 * time.Second)
+	defer tick.Stop()
+	zeroSince := time.Time{}
+	for range tick.C {
+		l.mu.Lock()
+		n, idle := l.nSess, time.Since(l.lastSeen)
+		l.mu.Unlock()
+
+		if n == 0 {
+			// no claude session — stop shortly after the last request
+			if zeroSince.IsZero() {
+				zeroSince = time.Now()
+			}
+			if time.Since(zeroSince) > zeroGrace {
+				_ = srv.Close()
+				return
+			}
+		} else {
+			zeroSince = time.Time{}
+			// a session is registered — keep running even when idle, unless
+			// it's been silent long enough to be a crashed (zombie) session
+			if idle > zombieTimeout {
+				log.Printf("session(s) registered but silent %s — assuming crashed, stopping", idle.Round(time.Minute))
+				_ = srv.Close()
+				return
+			}
+		}
+	}
 }
 
 // rotator holds the in-memory token state for the proxy.
@@ -394,13 +491,11 @@ func parseFirstTime(h http.Header, keys ...string) time.Time {
 // same data `/usage` in Claude Code would show for the currently active
 // account, since the proxy serves that account's token to every request.
 func cmdStatus() {
-	base := "http://" + envOr("AM_PROXY_ADDR", "127.0.0.1:8787")
-	if !proxyUp(base) {
-		fmt.Println("proxy not running.  am daemon install   (or: am proxy)")
-		fmt.Println("without it, plain `claude` talks straight to Anthropic and no rotation happens.")
+	if !proxyUp() {
+		fmt.Println("proxy not running (starts automatically when you launch claude).")
 		return
 	}
-	resp, err := http.Get(base + "/_am/status")
+	resp, err := http.Get(proxyBase() + "/_am/status")
 	if err != nil {
 		die("status: %v", err)
 	}
@@ -444,21 +539,20 @@ func cmdStatus() {
 	}
 }
 
-// cmdSwitch changes the active account. If the proxy is running it switches the
-// proxy live (a running `claude` keeps going, next request uses the new
-// account). Otherwise it falls back to a disk swap (am use).
+// cmdSwitch forces the proxy to the named account right now. The running
+// `claude` keeps its session; its next request (and `/usage`) uses the new
+// account. Falls back to an on-disk swap if the proxy isn't running.
 func cmdSwitch(tool, name string) {
 	if tool != "claude" {
 		cmdUse(tool, name)
 		return
 	}
-	base := "http://" + envOr("AM_PROXY_ADDR", "127.0.0.1:8787")
-	if !proxyUp(base) {
+	if !proxyUp() {
 		fmt.Println("proxy not running; swapping on-disk credentials instead")
 		cmdUse(tool, name)
 		return
 	}
-	resp, err := http.Post(base+"/_am/switch?to="+url.QueryEscape(name), "", nil)
+	resp, err := http.Post(proxyBase()+"/_am/switch?to="+url.QueryEscape(name), "", nil)
 	if err != nil {
 		die("proxy switch: %v", err)
 	}
@@ -467,95 +561,12 @@ func cmdSwitch(tool, name string) {
 	if resp.StatusCode != 200 {
 		die("proxy switch: %s", strings.TrimSpace(string(b)))
 	}
-	fmt.Printf("proxy now serving: %s (running claude keeps its session)\n", name)
+	fmt.Printf("switched to %s (no restart needed)\n", name)
 }
 
-// cmdRun execs a tool with env pointed at a running proxy.
-func cmdRun(tool string, rest []string) { runTool(tool, rest, false) }
-
-// cmdUp is like cmdRun but starts the proxy in the background first if it is
-// not already listening.
-func cmdUp(tool string, rest []string) { runTool(tool, rest, true) }
-
-func runTool(tool string, rest []string, autostart bool) {
-	bin, err := lookPath(tool)
-	if err != nil {
-		die("%v", err)
-	}
-
-	// Only Claude has proxy rotation. Other tools just exec directly — their
-	// CLIs re-read their auth file each run, so `am use` already suffices.
-	if tool != "claude" {
-		execProcess(bin, append([]string{tool}, rest...), os.Environ())
-		return
-	}
-
-	addr := envOr("AM_PROXY_ADDR", "127.0.0.1:8787")
-	base := "http://" + addr
-	// Only set ANTHROPIC_BASE_URL, not ANTHROPIC_AUTH_TOKEN: with the token set,
-	// Claude Code switches to "API key" mode and stops showing the logged-in
-	// account. Without it, Claude Code keeps its OAuth identity (account shows
-	// in the UI) and still sends every request through the proxy, which
-	// overrides the outbound token for rotation.
-	env := append(os.Environ(),
-		"ANTHROPIC_BASE_URL="+base,
-		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
-	)
-	if os.Getenv("AM_PROXY_AUTH_TOKEN") != "" {
-		env = append(env, "ANTHROPIC_AUTH_TOKEN="+os.Getenv("AM_PROXY_AUTH_TOKEN"))
-	}
-
-	if !proxyUp(base) {
-		if !autostart {
-			die("proxy not reachable at %s (start it with: am proxy)", base)
-		}
-		startProxyBackground(addr)
-		for i := 0; i < 50; i++ {
-			if proxyUp(base) {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		if !proxyUp(base) {
-			die("proxy failed to start; see %s", filepath.Join(baseDir(), "proxy.log"))
-		}
-		fmt.Fprintf(os.Stderr, "am: proxy started in background (log: %s)\n", filepath.Join(baseDir(), "proxy.log"))
-	}
-
-	// Claude Code needs a valid OAuth credential on disk to start at all (it
-	// checks before making any request). Make sure the active profile's
-	// credential is the one installed, so the UI shows the right account.
-	ensureActiveCredentialInstalled()
-
-	// Replace this process with the tool — same as running it directly, so its
-	// terminal handling (device-attribute queries at startup, mode restore on
-	// exit) behaves identically to launching it without `am`.
-	execProcess(bin, append([]string{tool}, rest...), env)
-}
-
-// ensureActiveCredentialInstalled restores the proxy's active profile onto the
-// system if the live login doesn't already match it.
-func ensureActiveCredentialInstalled() {
-	active := readActivePointer("claude")
-	if active == "" {
-		return
-	}
-	live := detectAccount(toolSpec("claude"))
-	want := readMeta("claude", active).Account
-	if live != "" && live == want {
-		return // already correct
-	}
-	if _, err := os.Stat(bundlePath("claude", active)); err != nil {
-		return
-	}
-	for _, e := range loadProfileEntries("claude", active) {
-		_ = applyEntry(e)
-	}
-}
-
-func proxyUp(base string) bool {
+func proxyUp() bool {
 	c := http.Client{Timeout: 500 * time.Millisecond}
-	resp, err := c.Get(base + "/_am/status")
+	resp, err := c.Get(proxyBase() + "/_am/status")
 	if err != nil {
 		return false
 	}
@@ -563,7 +574,31 @@ func proxyUp(base string) bool {
 	return true
 }
 
-func startProxyBackground(addr string) {
+// proxyEnsureUp starts the background proxy if it isn't already listening and
+// registers one Claude session with it. Called by the SessionStart hook.
+func proxyEnsureUp() {
+	if !proxyUp() {
+		spawnProxy()
+		for i := 0; i < 50 && !proxyUp(); i++ {
+			time.Sleep(100 * time.Millisecond)
+		}
+		if !proxyUp() {
+			fmt.Fprintf(os.Stderr, "am: proxy failed to start (see %s)\n", filepath.Join(baseDir(), "proxy.log"))
+			return
+		}
+	}
+	_, _ = http.Post(proxyBase()+"/_am/session?op=start", "", nil)
+}
+
+// proxyReleaseAndMaybeStop deregisters a session; the proxy stops itself once
+// the count reaches zero. Called by the SessionEnd hook.
+func proxyReleaseAndMaybeStop() {
+	if proxyUp() {
+		_, _ = http.Post(proxyBase()+"/_am/session?op=end", "", nil)
+	}
+}
+
+func spawnProxy() {
 	self, err := os.Executable()
 	if err != nil {
 		die("locate self: %v", err)
@@ -575,10 +610,8 @@ func startProxyBackground(addr string) {
 		die("open proxy.log: %v", err)
 	}
 	devnull, _ := os.Open(os.DevNull)
-	cmd := exec.Command(self, "proxy", "--addr", addr)
-	cmd.Stdin = devnull // never share the tty — nothing the proxy does should
-	cmd.Stdout = logf   // ever touch the terminal the user is typing into
-	cmd.Stderr = logf
+	cmd := exec.Command(self, "proxy", "--addr", proxyAddr())
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = devnull, logf, logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		die("start proxy: %v", err)
@@ -594,13 +627,6 @@ func envOr(k, d string) string {
 		return v
 	}
 	return d
-}
-
-func fmtFrac(f float64) string {
-	if f < 0 {
-		return "?"
-	}
-	return fmt.Sprintf("%.0f%%", f*100)
 }
 
 var _ = io.Discard

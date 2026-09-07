@@ -2,8 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"os/exec"
-	"syscall"
 	"time"
 )
 
@@ -75,15 +73,5 @@ func liveAccountEmail() string {
 func installActiveProfile(name string) {
 	for _, e := range loadProfileEntries("claude", name) {
 		_ = applyEntry(e)
-	}
-}
-
-// ---- small os helpers kept here to keep proxy.go focused ----
-
-func lookPath(name string) (string, error) { return exec.LookPath(name) }
-
-func execProcess(bin string, argv, env []string) {
-	if err := syscall.Exec(bin, argv, env); err != nil {
-		die("exec %s: %v", bin, err)
 	}
 }

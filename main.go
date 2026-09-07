@@ -37,30 +37,28 @@ func usage() {
 	fmt.Print(`am - AI CLI account manager
 
 Setup (once):
-  am daemon install        run the rotating proxy as a LaunchAgent (KeepAlive)
-  am env                    prints the line to add to ~/.zshrc:
-                            export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
   am save claude            snapshot each account you want in rotation
                             (log into the next one in Claude, run again)
+  am hook install           wire the proxy to Claude Code's start/stop hooks
+                            and add ANTHROPIC_BASE_URL to your shell rc
 
-Then just use 'claude' normally — it goes through the proxy, which swaps to
-another account before a rate limit stops you, with no restart.
+After that use 'claude' normally. The proxy starts with your first session,
+swaps to another account before a rate limit stops you (no restart), and
+stops itself when the last session ends.
 
   am ls [tool]              list saved profiles (and which is active)
   am current [tool]         show the account each tool is logged in as
   am status                 proxy state: active account, limits, switches
   am save <tool> [name]     snapshot current login (name defaults to the email)
   am use    <tool> <name>   restore a profile on disk
-  am switch <tool> <name>   switch account now — live via the proxy, no restart
+  am switch <tool> <name>   switch account now — no restart
   am rm   <tool> <name>     delete a profile
   am add  <tool> <name>     log in fresh, then 'am save'
 
-  am daemon install|uninstall|status|restart
-  am proxy [--addr host:port]        run the proxy in the foreground
-  am run|up <tool> [args...]         run a tool with env pointed at the proxy
-                                     (not needed if ANTHROPIC_BASE_URL is set)
+  am hook install|uninstall|status
+  am proxy                  run the proxy in the foreground (normally automatic)
 
-  am export [tool] [name..]          encrypted blob of profiles for another machine
+  am export [tool] [name..] encrypted blob of profiles for another machine
   am import [--file f] [--activate tool=name]
 
 tools: claude (proxy rotation), codex, gemini (profile swap only)
@@ -94,24 +92,16 @@ func main() {
 	case "add":
 		need(args, 3)
 		cmdAdd(args[1], args[2])
+	case "hook":
+		cmdHook(args[1:])
 	case "proxy":
 		cmdProxy(args[1:])
-	case "run":
-		need(args, 2)
-		cmdRun(args[1], args[2:])
-	case "up":
-		need(args, 2)
-		cmdUp(args[1], args[2:])
+	case "status", "st":
+		cmdStatus()
 	case "export":
 		cmdExport(args[1:])
 	case "import":
 		cmdImport(args[1:])
-	case "daemon":
-		cmdDaemon(args[1:])
-	case "env":
-		fmt.Printf("export ANTHROPIC_BASE_URL=http://%s\n", envOr("AM_PROXY_ADDR", "127.0.0.1:8787"))
-	case "status", "st":
-		cmdStatus()
 	case "-h", "--help", "help":
 		usage()
 	default:
