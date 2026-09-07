@@ -390,6 +390,60 @@ func parseFirstTime(h http.Header, keys ...string) time.Time {
 	return time.Time{}
 }
 
+// cmdStatus queries a running proxy and prints per-account limit info — the
+// same data `/usage` in Claude Code would show for the currently active
+// account, since the proxy serves that account's token to every request.
+func cmdStatus() {
+	base := "http://" + envOr("AM_PROXY_ADDR", "127.0.0.1:8787")
+	if !proxyUp(base) {
+		fmt.Println("proxy not running.  am daemon install   (or: am proxy)")
+		fmt.Println("without it, plain `claude` talks straight to Anthropic and no rotation happens.")
+		return
+	}
+	resp, err := http.Get(base + "/_am/status")
+	if err != nil {
+		die("status: %v", err)
+	}
+	defer resp.Body.Close()
+	var s struct {
+		Tool     string `json:"tool"`
+		Switches int    `json:"switches"`
+		Accounts []struct {
+			Profile    string   `json:"profile"`
+			Account    string   `json:"account"`
+			Active     bool     `json:"active"`
+			Remaining  float64  `json:"remaining"`
+			LimitReset string   `json:"limit_reset"`
+			Cooldown   string   `json:"cooldown_until"`
+		} `json:"accounts"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+		die("status decode: %v", err)
+	}
+	fmt.Printf("proxy up · %d switch(es) this run\n\n", s.Switches)
+	for _, a := range s.Accounts {
+		mark := "  "
+		if a.Active {
+			mark = "> "
+		}
+		line := fmt.Sprintf("%s%s", mark, orDash(a.Account))
+		if a.Remaining >= 0 {
+			line += fmt.Sprintf("   %.0f%% left", a.Remaining*100)
+		}
+		if a.LimitReset != "" {
+			if t, e := time.Parse(time.RFC3339, a.LimitReset); e == nil {
+				line += "   resets " + t.Local().Format("15:04")
+			}
+		}
+		if a.Cooldown != "" {
+			if t, e := time.Parse(time.RFC3339, a.Cooldown); e == nil {
+				line += "   (cooldown until " + t.Local().Format("15:04") + ")"
+			}
+		}
+		fmt.Println(line)
+	}
+}
+
 // cmdSwitch changes the active account. If the proxy is running it switches the
 // proxy live (a running `claude` keeps going, next request uses the new
 // account). Otherwise it falls back to a disk swap (am use).

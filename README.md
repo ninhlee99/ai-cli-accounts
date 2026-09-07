@@ -103,7 +103,39 @@ Edit `~/.am/config.json` to add paths or tools.
 
 ## Auto-rotating proxy (Claude)
 
-Requires **2+ saved Claude profiles**.
+Set it up once, then use plain `claude` — no wrapper, nothing changes about
+how you launch it.
+
+```sh
+am daemon install            # runs the proxy as a KeepAlive LaunchAgent
+am save claude               # snapshot each account you want (log into the
+am save claude               #   next one in Claude, run again)
+echo 'export ANTHROPIC_BASE_URL=http://127.0.0.1:8787' >> ~/.zshrc
+# open a new shell, then:
+claude
+```
+
+`claude` now talks to the proxy. When the active account nears its limit (or
+gets a 429), the proxy installs the next account's credential and points
+itself there — the running `claude` keeps going and picks up the new account
+on its next keychain read. `/usage` inside Claude Code reports the account
+currently in use, because every request (that one included) carries that
+account's token.
+
+```sh
+am status                    # active account, limits, switch count
+am switch claude <name>      # force a switch now, no restart
+am daemon status|restart|uninstall
+```
+
+Requires **2+ saved Claude profiles** for rotation. With `ANTHROPIC_BASE_URL`
+unset, `claude` bypasses the proxy entirely and none of this applies.
+
+### The old way (still works)
+
+`am run claude` / `am up claude` set the env for a single run instead of via
+`~/.zshrc`. Not recommended — running claude as a child of `am` can disturb
+its terminal startup.
 
 ```sh
 am claude                    # = am up claude: start the proxy if needed,

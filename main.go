@@ -36,33 +36,34 @@ func die(format string, a ...any) {
 func usage() {
 	fmt.Print(`am - AI CLI account manager
 
-  am <tool> [args...]       shortcut for 'am up': run the tool, starting the
-                            proxy first if needed  (e.g. am claude --continue)
+Setup (once):
+  am daemon install        run the rotating proxy as a LaunchAgent (KeepAlive)
+  am env                    prints the line to add to ~/.zshrc:
+                            export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
+  am save claude            snapshot each account you want in rotation
+                            (log into the next one in Claude, run again)
+
+Then just use 'claude' normally — it goes through the proxy, which swaps to
+another account before a rate limit stops you, with no restart.
 
   am ls [tool]              list saved profiles (and which is active)
-  am current [tool]         show the account each tool is currently logged in as
-  am save <tool> [name]     snapshot the current login (name defaults to the
-                            account email, e.g. you@gmail.com)
-  am use    <tool> <name>   restore a profile on disk (auto-saves current first)
-  am switch <tool> <name>   switch account; live via the proxy if it's running,
-                            else same as 'use'
+  am current [tool]         show the account each tool is logged in as
+  am status                 proxy state: active account, limits, switches
+  am save <tool> [name]     snapshot current login (name defaults to the email)
+  am use    <tool> <name>   restore a profile on disk
+  am switch <tool> <name>   switch account now — live via the proxy, no restart
   am rm   <tool> <name>     delete a profile
-  am add  <tool> <name>     alias for: log in fresh, then 'am save'
-  am proxy [--addr host:port]
-                            run the rotating proxy (Claude: auto-switch profile
-                            before the rate limit is hit, refresh OAuth tokens)
-  am run  <tool> [args...]  exec the tool with env pointed at an already-running
-                            proxy (fails if none)
-  am up   <tool> [args...]  run the tool, auto-starting the proxy if needed
-                            (same as the 'am <tool>' shortcut)
+  am add  <tool> <name>     log in fresh, then 'am save'
 
-  am export [tool] [name..] print an encrypted, passphrase-protected blob of
-                            profiles to move to another machine
+  am daemon install|uninstall|status|restart
+  am proxy [--addr host:port]        run the proxy in the foreground
+  am run|up <tool> [args...]         run a tool with env pointed at the proxy
+                                     (not needed if ANTHROPIC_BASE_URL is set)
+
+  am export [tool] [name..]          encrypted blob of profiles for another machine
   am import [--file f] [--activate tool=name]
-                            read a blob (stdin or -f) and add profiles that
-                            aren't present yet; existing ones are kept as-is
 
-tools: claude, codex, gemini   (codex/gemini run directly, no proxy)
+tools: claude (proxy rotation), codex, gemini (profile swap only)
 profiles are encrypted with a master key held in the macOS Keychain.
 `)
 }
@@ -73,13 +74,6 @@ func main() {
 		usage()
 		return
 	}
-	// Shortcut: `am claude [args]` == `am up claude [args]` (start proxy if
-	// needed, then exec). Any bare tool name works.
-	if isToolName(args[0]) {
-		cmdUp(args[0], args[1:])
-		return
-	}
-
 	switch args[0] {
 	case "ls", "list":
 		cmdLs(args[1:])
@@ -112,16 +106,17 @@ func main() {
 		cmdExport(args[1:])
 	case "import":
 		cmdImport(args[1:])
+	case "daemon":
+		cmdDaemon(args[1:])
+	case "env":
+		fmt.Printf("export ANTHROPIC_BASE_URL=http://%s\n", envOr("AM_PROXY_ADDR", "127.0.0.1:8787"))
+	case "status", "st":
+		cmdStatus()
 	case "-h", "--help", "help":
 		usage()
 	default:
 		die("unknown command %q (try: am help)", args[0])
 	}
-}
-
-func isToolName(s string) bool {
-	_, ok := loadConfig().Tools[s]
-	return ok
 }
 
 func need(args []string, n int) {
