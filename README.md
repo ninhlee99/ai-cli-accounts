@@ -27,7 +27,7 @@ macOS only (uses the `security` keychain CLI). Needs Go 1.22+.
 ## Profile management
 
 ```sh
-am now                       # who each tool is logged in as right now
+am current                   # who each tool is logged in as right now
 
 am save claude               # snapshot current login; profile name = the
                              # account email, e.g. "you@gmail.com"
@@ -106,47 +106,53 @@ Edit `~/.am/config.json` to add paths or tools.
 Requires **2+ saved Claude profiles**.
 
 ```sh
-am up claude                 # one command: starts the proxy in the background
-                             # (if not already up), then execs claude through it
+am claude                    # = am up claude: start the proxy if needed,
+                             # then run claude through it
+am claude --continue         # any claude args pass through
 
-# or run the two halves yourself:
+# or the pieces:
 am proxy                     # foreground, on 127.0.0.1:8787
-am run claude                # in another shell; needs the proxy already running
-
-# or wire the env by hand:
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
-export ANTHROPIC_AUTH_TOKEN=am-proxy
-claude
+am run claude                # another shell; needs the proxy already up
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8787 && claude   # by hand
 ```
 
-While the proxy runs: `am switch claude <name>` forces the next request onto
-that account without stopping your session. `pkill -f "am proxy"` stops it.
+Only `ANTHROPIC_BASE_URL` is set — **not** `ANTHROPIC_AUTH_TOKEN`. That keeps
+Claude Code in OAuth mode (it still shows your account and bills your
+subscription, not API credit); every request just travels through the proxy.
 
-The proxy:
+While the proxy runs: `am switch claude <name>` puts the next request on that
+account without stopping your session. `pkill -f "am proxy"` stops the proxy.
 
-- injects the active profile's OAuth **access token** on every request;
-- **refreshes** that token ~2 min before it expires (using the profile's
-  refresh token) and writes the fresh token back into the encrypted profile;
-- watches `anthropic-ratelimit-unified-*` response headers and **HTTP 429**;
-  when the active account is near its limit or gets a 429, the *next* request
-  is served from the next profile in rotation — the in-flight request still
-  completes, so `claude` never stalls mid-task;
-- puts a limited account on cooldown until its reset time, then rotates back.
+How it works:
 
-`GET http://127.0.0.1:8787/_am/status` shows per-account remaining, token
-expiry, cooldowns, and switch count.
+- **Claude Code owns the OAuth refresh.** Refresh tokens rotate on use, so the
+  proxy never refreshes — it reads the live keychain token on each request and
+  forwards that, so it always uses whatever Claude Code last refreshed to.
+- On startup the proxy adopts the account Claude is currently logged in as
+  (snapshotting it as a profile if new).
+- It watches `anthropic-ratelimit-unified-*` headers and **HTTP 429**. When the
+  active account is near its limit (or 429s), it installs the next profile's
+  credential onto the system and points itself there. The in-flight request
+  still completes; the next one is the new account. Claude Code re-reads the
+  keychain within a few minutes (or on a 401) and follows — no restart.
+- A limited account goes on cooldown until its reset time, then rotates back.
+
+`GET http://127.0.0.1:8787/_am/status` → per-account: active flag, email,
+last-seen remaining, limit reset, cooldown, total switches.
 
 ### Limits / honesty
 
-- Anthropic does not always send a live "percent remaining" header on ordinary
-  API calls — often only the window reset time. Rotation then relies on the 429
-  fallback (reactive, one throttled response before the switch). Set
-  `--upstream` to a metering proxy if you want fully proactive rotation.
-- A `claude` process that was started *without* the proxy keeps its old token
-  until restart. Start it via `am run claude` (or with the env vars) to get
-  hot rotation. `am use` alone only changes what the *next* `claude` start
-  picks up — resume your session with `claude --continue`.
-- Codex / Gemini proxy rotation is not implemented yet (profile save/use works).
+- Anthropic often sends only the window **reset time**, not a live "percent
+  remaining", on ordinary calls. Rotation then leans on the 429 fallback:
+  reactive — one throttled response before the switch, but the session doesn't
+  stop and no work is redone.
+- The switch isn't instantaneous end-to-end: the proxy is correct immediately,
+  but Claude Code's UI/account view only catches up when it next re-reads the
+  keychain.
+- The account view in Claude Code still says "API Usage Billing" is **not**
+  expected here — if you see it, `ANTHROPIC_AUTH_TOKEN` is set in your
+  environment; unset it.
+- Codex / Gemini have no proxy rotation (profile save / use / switch work).
 
 ## Layout
 
@@ -158,5 +164,5 @@ expiry, cooldowns, and switch count.
 | `crypto.go`           | AES-GCM, master key in keychain |
 | `keychain_darwin.go`  | `security` CLI wrapper (raw-value safe) |
 | `proxy.go`            | reverse proxy + rotator |
-| `claude_token.go`     | Claude OAuth token parse / refresh |
+| `claude_token.go`     | Claude OAuth token: read from keychain / profile bundle |
 | `transfer.go`         | `am export` / `am import` (passphrase-encrypted bundle) |

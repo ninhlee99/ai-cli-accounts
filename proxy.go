@@ -60,8 +60,12 @@ func cmdProxy(args []string) {
 			r.URL.Host = target.Host
 			r.Host = target.Host
 			tok := rot.token()
+			hadAuth := r.Header.Get("Authorization") != "" || r.Header.Get("X-Api-Key") != ""
 			r.Header.Set("Authorization", "Bearer "+tok)
 			r.Header.Del("X-Api-Key")
+			if os.Getenv("AM_PROXY_DEBUG") != "" {
+				log.Printf("%s %s  (client sent auth: %v -> using %s)", r.Method, r.URL.Path, hadAuth, rot.active())
+			}
 			// Claude Code's OAuth path expects this beta flag.
 			if !strings.Contains(r.Header.Get("anthropic-beta"), "oauth") {
 				r.Header.Add("anthropic-beta", "oauth-2025-04-20")
@@ -95,7 +99,7 @@ func cmdProxy(args []string) {
 
 	fmt.Printf("am proxy on http://%s -> %s\n", addr, upstream)
 	fmt.Printf("active claude profile: %s   (rotation order: %s)\n", rot.active(), strings.Join(rot.names(), " -> "))
-	fmt.Printf("\npoint Claude Code at it:\n  export ANTHROPIC_BASE_URL=http://%s\n  export ANTHROPIC_AUTH_TOKEN=am-proxy   # any non-empty value\n\n", addr)
+	fmt.Printf("\npoint Claude Code at it (Claude Code keeps its OAuth identity):\n  export ANTHROPIC_BASE_URL=http://%s\n\n", addr)
 	log.Fatal(http.ListenAndServe(addr, mux))
 }
 
@@ -103,21 +107,23 @@ func cmdProxy(args []string) {
 type rotator struct {
 	tool string
 
-	mu        sync.Mutex
-	order     []string          // profile names, rotation order
-	idx       int               // index into order
-	tokens    map[string]*token // profile name -> live token
-	cooldown  map[string]time.Time
-	switches  int
+	mu         sync.Mutex
+	order      []string          // profile names, rotation order
+	idx        int               // index into order
+	tokens     map[string]*token // profile name -> token from its bundle (fallback)
+	accounts   map[string]string // profile name -> account email (cached)
+	cooldown   map[string]time.Time
+	switches   int
 	lastSwitch time.Time
 }
 
 type token struct {
-	Access       string
-	Refresh      string
-	ExpiresAt    time.Time
-	remaining    float64 // last seen unified-remaining fraction/count (-1 unknown)
-	resetAt      time.Time
+	Access    string
+	Refresh   string
+	ExpiresAt time.Time
+	account   string
+	remaining float64 // last seen unified-remaining fraction/count (-1 unknown)
+	resetAt   time.Time
 }
 
 const (
@@ -133,10 +139,12 @@ func (r *rotator) load() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.tokens = map[string]*token{}
+	r.accounts = map[string]string{}
 	r.cooldown = map[string]time.Time{}
 	for _, p := range listProfiles(r.tool) {
 		r.order = append(r.order, p.Name)
 		r.tokens[p.Name] = loadClaudeToken(r.tool, p.Name)
+		r.accounts[p.Name] = p.Account
 	}
 	if a := readActivePointer(r.tool); a != "" {
 		for i, n := range r.order {
@@ -167,28 +175,48 @@ func (r *rotator) setActive(name string) {
 	writeActivePointer(r.tool, name)
 }
 
-// token returns a valid access token for the active profile, refreshing if due.
+// token returns the current access token for the active account.
+//
+// The active account's credential lives in the system keychain and Claude Code
+// is the one that refreshes it (OAuth refresh tokens rotate — only one party
+// may hold that job). We read the keychain live so we always forward whatever
+// Claude Code most recently refreshed to. The profile bundle is only the
+// fallback for an account that isn't the one currently installed.
 func (r *rotator) token() string {
 	r.mu.Lock()
 	name := r.order[r.idx]
-	t := r.tokens[name]
+	acct := r.metaAccount(name)
+	fallback := r.tokens[name]
 	r.mu.Unlock()
 
-	if t == nil {
-		return ""
-	}
-	if time.Until(t.ExpiresAt) < refreshLead && t.Refresh != "" {
-		if nt, err := refreshClaudeToken(t.Refresh); err == nil {
-			r.mu.Lock()
-			t.Access, t.Refresh, t.ExpiresAt = nt.Access, nt.Refresh, nt.ExpiresAt
-			r.mu.Unlock()
-			persistClaudeToken(r.tool, name, t)
-			log.Printf("[%s] refreshed access token (exp %s)", name, t.ExpiresAt.Format(time.Kitchen))
-		} else {
-			log.Printf("[%s] token refresh failed: %v", name, err)
+	if live := liveKeychainToken(); live != nil {
+		if acct == "" || live.account == "" || strings.EqualFold(live.account, acct) {
+			return live.Access
 		}
+		// Keychain holds a different account than the profile we think is
+		// active — install the active profile so they line up.
+		if fallback != nil && fallback.Access != "" {
+			installActiveProfile(name)
+			return fallback.Access
+		}
+		return live.Access
 	}
-	return t.Access
+	if fallback != nil {
+		return fallback.Access
+	}
+	return ""
+}
+
+func (r *rotator) metaAccount(name string) string {
+	if r.accounts == nil {
+		r.accounts = map[string]string{}
+	}
+	if a, ok := r.accounts[name]; ok {
+		return a
+	}
+	a := readMeta(r.tool, name).Account
+	r.accounts[name] = a
+	return a
 }
 
 // observe reads rate-limit headers off each response and rotates if needed.
@@ -265,6 +293,7 @@ func (r *rotator) rotate(from, reason string) {
 		r.switches++
 		r.lastSwitch = time.Now()
 		writeActivePointer(r.tool, cand)
+		installActiveProfile(cand) // put cand's creds on the system so Claude Code follows
 		log.Printf("ROTATE (%s): %s -> %s", reason, from, cand)
 		return
 	}
@@ -295,6 +324,7 @@ func (r *rotator) forceSwitch(name string) error {
 	r.switches++
 	r.lastSwitch = time.Now()
 	writeActivePointer(r.tool, target)
+	installActiveProfile(target)
 	log.Printf("MANUAL SWITCH -> %s", target)
 	return nil
 }
@@ -305,10 +335,13 @@ func (r *rotator) status() map[string]any {
 	accts := []map[string]any{}
 	for _, n := range r.order {
 		t := r.tokens[n]
-		m := map[string]any{"profile": n, "active": n == r.order[r.idx]}
+		m := map[string]any{
+			"profile": n,
+			"account": r.accounts[n],
+			"active":  n == r.order[r.idx],
+		}
 		if t != nil {
 			m["remaining"] = t.remaining
-			m["token_expires"] = t.ExpiresAt
 			if !t.resetAt.IsZero() {
 				m["limit_reset"] = t.resetAt
 			}
@@ -405,11 +438,18 @@ func runTool(tool string, rest []string, autostart bool) {
 
 	addr := envOr("AM_PROXY_ADDR", "127.0.0.1:8787")
 	base := "http://" + addr
+	// Only set ANTHROPIC_BASE_URL, not ANTHROPIC_AUTH_TOKEN: with the token set,
+	// Claude Code switches to "API key" mode and stops showing the logged-in
+	// account. Without it, Claude Code keeps its OAuth identity (account shows
+	// in the UI) and still sends every request through the proxy, which
+	// overrides the outbound token for rotation.
 	env := append(os.Environ(),
 		"ANTHROPIC_BASE_URL="+base,
-		"ANTHROPIC_AUTH_TOKEN=am-proxy",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
 	)
+	if os.Getenv("AM_PROXY_AUTH_TOKEN") != "" {
+		env = append(env, "ANTHROPIC_AUTH_TOKEN="+os.Getenv("AM_PROXY_AUTH_TOKEN"))
+	}
 
 	if !proxyUp(base) {
 		if !autostart {
@@ -427,7 +467,33 @@ func runTool(tool string, rest []string, autostart bool) {
 		}
 		fmt.Printf("am: proxy started in background (log: %s)\n", filepath.Join(baseDir(), "proxy.log"))
 	}
+
+	// Claude Code needs a valid OAuth credential on disk to start at all (it
+	// checks before making any request). Make sure the active profile's
+	// credential is the one installed, so the UI shows the right account.
+	ensureActiveCredentialInstalled()
+
 	execProcess(bin, append([]string{tool}, rest...), env)
+}
+
+// ensureActiveCredentialInstalled restores the proxy's active profile onto the
+// system if the live login doesn't already match it.
+func ensureActiveCredentialInstalled() {
+	active := readActivePointer("claude")
+	if active == "" {
+		return
+	}
+	live := detectAccount(toolSpec("claude"))
+	want := readMeta("claude", active).Account
+	if live != "" && live == want {
+		return // already correct
+	}
+	if _, err := os.Stat(bundlePath("claude", active)); err != nil {
+		return
+	}
+	for _, e := range loadProfileEntries("claude", active) {
+		_ = applyEntry(e)
+	}
 }
 
 func proxyUp(base string) bool {

@@ -1,118 +1,81 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
 	"os/exec"
 	"syscall"
 	"time"
 )
 
 // Claude Code stores its OAuth token as JSON under key "claudeAiOauth" inside
-// the keychain item "Claude Code-credentials" (and mirrors config in ~/.claude.json).
-// The public client_id below is the one Claude Code itself uses for the PKCE flow.
-const claudeOAuthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-const claudeTokenURL = "https://console.anthropic.com/v1/oauth/token"
+// the keychain item "Claude Code-credentials" (config is mirrored in
+// ~/.claude.json). Claude Code owns refreshing this token — OAuth refresh
+// tokens rotate on use, so the proxy must never race it. The proxy only reads.
+
+const claudeKeychainService = "Claude Code-credentials"
 
 type claudeCreds struct {
 	ClaudeAiOauth struct {
-		AccessToken           string `json:"accessToken"`
-		RefreshToken          string `json:"refreshToken"`
-		ExpiresAt             int64  `json:"expiresAt"` // epoch millis
-		RefreshTokenExpiresAt int64  `json:"refreshTokenExpiresAt"`
-		Scopes                []string `json:"scopes"`
-		SubscriptionType      string `json:"subscriptionType"`
-		RateLimitTier         string `json:"rateLimitTier"`
+		AccessToken      string   `json:"accessToken"`
+		RefreshToken     string   `json:"refreshToken"`
+		ExpiresAt        int64    `json:"expiresAt"` // epoch millis
+		Scopes           []string `json:"scopes"`
+		SubscriptionType string   `json:"subscriptionType"`
 	} `json:"claudeAiOauth"`
-	MCPOAuth json.RawMessage `json:"mcpOAuth,omitempty"`
 }
 
-// loadClaudeToken reads the token embedded in a saved profile bundle.
+// loadClaudeToken reads the token embedded in a saved profile bundle (the
+// fallback used for accounts that aren't the one currently installed).
 func loadClaudeToken(tool, name string) *token {
 	for _, e := range loadProfileEntries(tool, name) {
-		if e.Artifact.Kind != "keychain" || e.Artifact.Service != "Claude Code-credentials" {
+		if e.Artifact.Kind != "keychain" || e.Artifact.Service != claudeKeychainService {
 			continue
 		}
-		var c claudeCreds
-		if json.Unmarshal(e.Data, &c) != nil {
-			continue
-		}
-		o := c.ClaudeAiOauth
-		return &token{
-			Access:    o.AccessToken,
-			Refresh:   o.RefreshToken,
-			ExpiresAt: time.UnixMilli(o.ExpiresAt),
-			remaining: -1,
+		if t := parseClaudeCreds(e.Data); t != nil {
+			return t
 		}
 	}
 	return &token{remaining: -1}
 }
 
-// persistClaudeToken writes a refreshed token back into the profile bundle so a
-// later `am use` restores the fresh token, not a stale one.
-func persistClaudeToken(tool, name string, t *token) {
-	entries := loadProfileEntries(tool, name)
-	for i := range entries {
-		e := &entries[i]
-		if e.Artifact.Kind != "keychain" || e.Artifact.Service != "Claude Code-credentials" {
-			continue
-		}
-		var c claudeCreds
-		if json.Unmarshal(e.Data, &c) != nil {
-			continue
-		}
-		c.ClaudeAiOauth.AccessToken = t.Access
-		c.ClaudeAiOauth.RefreshToken = t.Refresh
-		c.ClaudeAiOauth.ExpiresAt = t.ExpiresAt.UnixMilli()
-		if b, err := json.Marshal(&c); err == nil {
-			e.Data = b
-		}
-	}
-	enc := encrypt(packEntries(entries))
-	_ = writeFileAtomic(bundlePath(tool, name), enc, 0o600)
-}
-
-type refreshResp struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	ExpiresIn    int    `json:"expires_in"`
-	Error        string `json:"error"`
-	ErrorDesc    string `json:"error_description"`
-}
-
-func refreshClaudeToken(refresh string) (*token, error) {
-	body, _ := json.Marshal(map[string]string{
-		"grant_type":    "refresh_token",
-		"refresh_token": refresh,
-		"client_id":     claudeOAuthClientID,
-	})
-	req, _ := http.NewRequest("POST", claudeTokenURL, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+// liveKeychainToken reads the OAuth token currently installed on the system.
+func liveKeychainToken() *token {
+	s, err := kcGet(claudeKeychainService, "")
 	if err != nil {
-		return nil, err
+		return nil
 	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-	var rr refreshResp
-	if err := json.Unmarshal(raw, &rr); err != nil {
-		return nil, fmt.Errorf("bad refresh response (%d): %s", resp.StatusCode, string(raw))
+	return parseClaudeCreds([]byte(s))
+}
+
+func parseClaudeCreds(b []byte) *token {
+	var c claudeCreds
+	if json.Unmarshal(b, &c) != nil {
+		return nil
 	}
-	if rr.Error != "" || rr.AccessToken == "" {
-		return nil, fmt.Errorf("refresh rejected: %s %s", rr.Error, rr.ErrorDesc)
-	}
-	newRefresh := rr.RefreshToken
-	if newRefresh == "" {
-		newRefresh = refresh
+	o := c.ClaudeAiOauth
+	if o.AccessToken == "" {
+		return nil
 	}
 	return &token{
-		Access:    rr.AccessToken,
-		Refresh:   newRefresh,
-		ExpiresAt: time.Now().Add(time.Duration(rr.ExpiresIn) * time.Second),
-	}, nil
+		Access:    o.AccessToken,
+		Refresh:   o.RefreshToken,
+		ExpiresAt: time.UnixMilli(o.ExpiresAt),
+		account:   liveAccountEmail(),
+		remaining: -1,
+	}
+}
+
+// liveAccountEmail reads the logged-in email from ~/.claude.json.
+func liveAccountEmail() string {
+	return detectAccount(toolSpec("claude"))
+}
+
+// installActiveProfile restores a profile's full credential set onto the system
+// (keychain + files), so the live login matches the proxy's active account.
+func installActiveProfile(name string) {
+	for _, e := range loadProfileEntries("claude", name) {
+		_ = applyEntry(e)
+	}
 }
 
 // ---- small os helpers kept here to keep proxy.go focused ----
