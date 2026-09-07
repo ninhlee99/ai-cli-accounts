@@ -331,6 +331,28 @@ func readMeta(tool, name string) profileMeta {
 	return m
 }
 
+// syncActiveFromSystem reads the account the tool is currently logged in as and
+// makes the matching profile active. If that live account has no profile yet,
+// it is snapshotted first (named after the account). No-op if nothing is
+// logged in.
+func syncActiveFromSystem(tool string) {
+	t := toolSpec(tool)
+	acct := detectAccount(t)
+	if acct == "" {
+		return
+	}
+	name := profileNameForAccount(tool, acct)
+	if name == "" {
+		name = sanitizeName(acct)
+		fmt.Printf("am: current %s login %q not saved yet — snapshotting it\n", tool, acct)
+		cmdSave(tool, name)
+		return
+	}
+	if readActivePointer(tool) != name {
+		writeActivePointer(tool, name)
+	}
+}
+
 func cmdRm(tool, name string) {
 	_ = os.Remove(bundlePath(tool, name))
 	_ = os.Remove(metaPath(tool, name))

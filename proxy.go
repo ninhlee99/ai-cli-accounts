@@ -36,9 +36,14 @@ func cmdProxy(args []string) {
 			upstream = args[i]
 		}
 	}
+	// Whatever account Claude is actually logged in as right now takes
+	// priority: capture it as a profile if it's new, and make it the active
+	// one, so `am claude` always starts on the account you last logged into.
+	syncActiveFromSystem("claude")
+
 	profs := listProfiles("claude")
 	if len(profs) == 0 {
-		die("no claude profiles saved; run `am save claude <name>` for each account first")
+		die("no claude profiles saved; run `am save claude` (log in first), or `am save claude <name>`")
 	}
 
 	rot := &rotator{tool: "claude"}
@@ -46,6 +51,7 @@ func cmdProxy(args []string) {
 	if rot.active() == "" {
 		rot.setActive(profs[0].Name)
 	}
+	fmt.Printf("am proxy: starting on account %q\n", rot.active())
 
 	target, _ := url.Parse(upstream)
 	rp := &httputil.ReverseProxy{
