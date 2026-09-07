@@ -1,6 +1,6 @@
-// Command am (account manager) snapshots and swaps the local login state of
-// AI CLIs (Claude Code, Codex, Gemini), and can run a local proxy that rotates
-// Claude accounts automatically before a rate limit interrupts your work.
+// Command am is the acctmgr CLI. It snapshots and swaps the local login state
+// of AI CLIs (Claude Code, Codex, Gemini), and can run a local proxy that
+// rotates Claude accounts automatically before a rate limit interrupts work.
 package main
 
 import (

@@ -1,4 +1,6 @@
-# am — AI CLI account manager
+# acctmgr — AI CLI account manager
+
+Repo: `acctmgr`. Command: `am`.
 
 Snapshot and swap the local login state of **Claude Code**, **Codex**, and
 **Gemini CLI** without logging out and back in. Plus a local proxy that rotates
@@ -15,6 +17,7 @@ the next request from another account.
 ## Install
 
 ```sh
+git clone <repo>/acctmgr && cd acctmgr
 go build -o am .
 mv am /usr/local/bin/
 ```
