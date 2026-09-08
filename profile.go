@@ -314,14 +314,50 @@ func loadProfileEntries(tool, name string) []entry {
 	return unpackEntries(decrypt(enc))
 }
 
+// updateProfileEntry rewrites one entry (matched by Artifact.Kind + Service/Path)
+// inside an existing profile bundle, leaving every other entry untouched. Used
+// after a token refresh so the bundle keeps the freshly-rotated refresh token
+// instead of going stale again next switch.
+func updateProfileEntry(tool, name string, updated entry) error {
+	entries := loadProfileEntries(tool, name)
+	found := false
+	for i, e := range entries {
+		if e.Artifact.Kind != updated.Artifact.Kind {
+			continue
+		}
+		if e.Artifact.Kind == "keychain" && e.Artifact.Service == updated.Artifact.Service {
+			entries[i] = updated
+			found = true
+			break
+		}
+		if e.Artifact.Kind == "file" && e.Artifact.Path == updated.Artifact.Path {
+			entries[i] = updated
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("no matching entry for %s/%s to update", tool, name)
+	}
+	enc := encrypt(packEntries(entries))
+	return os.WriteFile(bundlePath(tool, name), enc, 0o600)
+}
+
 func cmdUse(tool, name string) {
 	if _, err := os.Stat(bundlePath(tool, name)); err != nil {
 		die("no profile %s/%s (see: am ls %s)", tool, name, tool)
 	}
-	// Auto-snapshot whatever is logged in now, so nothing is lost.
-	if cur := detectAccount(toolSpec(tool)); cur != "" && matchProfileByAccount(tool, cur) == "" {
-		fmt.Printf("current %s login (%s) is unsaved; snapshotting as '_prev'\n", tool, cur)
-		cmdSave(tool, "_prev")
+	// Always resave whatever is logged in now into its own profile first, so
+	// a token Claude Code rotated while that account was active (refresh
+	// tokens are single-use / rotate-on-use) isn't lost the moment we
+	// overwrite the keychain with a different account.
+	if cur := detectAccount(toolSpec(tool)); cur != "" {
+		if matched := matchProfileByAccount(tool, cur); matched != "" {
+			cmdSave(tool, matched)
+		} else {
+			fmt.Printf("current %s login (%s) is unsaved; snapshotting as '_prev'\n", tool, cur)
+			cmdSave(tool, "_prev")
+		}
 	}
 	for _, e := range loadProfileEntries(tool, name) {
 		if err := applyEntry(e); err != nil {

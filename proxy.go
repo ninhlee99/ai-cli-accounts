@@ -66,6 +66,7 @@ func runProxyForeground(args []string) {
 	if rot.active() == "" {
 		rot.setActive(listProfiles("claude")[0].Name)
 	}
+	go rot.periodicSnapshot()
 
 	life := &lifecycle{}
 	life.touch()
@@ -219,6 +220,7 @@ type rotator struct {
 	tokens     map[string]*token // profile name -> token from its bundle (fallback)
 	accounts   map[string]string // profile name -> account email (cached)
 	cooldown   map[string]time.Time
+	dead       map[string]bool // profile name -> refresh token confirmed dead; skip in rotate() until re-login
 	switches   int
 	lastSwitch time.Time
 }
@@ -237,8 +239,7 @@ const (
 	rotateThreshold = 0.06
 	// don't return to an account that hit a limit until this long after its reset
 	cooldownPad = 30 * time.Second
-	// refresh an access token this long before it actually expires
-	refreshLead = 2 * time.Minute
+	// refreshLead (used for token-expiry checks) is defined in claude_token.go
 )
 
 func (r *rotator) load() {
@@ -247,6 +248,7 @@ func (r *rotator) load() {
 	r.tokens = map[string]*token{}
 	r.accounts = map[string]string{}
 	r.cooldown = map[string]time.Time{}
+	r.dead = map[string]bool{}
 	for _, p := range listProfiles(r.tool) {
 		r.order = append(r.order, p.Name)
 		r.tokens[p.Name] = loadClaudeToken(r.tool, p.Name)
@@ -264,7 +266,10 @@ func (r *rotator) load() {
 // refreshFromDisk picks up any profile saved since load() (e.g. a fresh `am
 // add`, or a new login just snapshotted by syncActiveFromSystem) without
 // disturbing in-memory rotation state (idx, cooldown, switch count) for
-// profiles it already knew about.
+// profiles it already knew about. It also clears any dead-refresh
+// blacklist entry for a profile whose bundle changed since we last cached
+// it — that's exactly what a re-login/re-save does, and it's the signal
+// that the account is trustworthy again.
 func (r *rotator) refreshFromDisk() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -273,12 +278,21 @@ func (r *rotator) refreshFromDisk() {
 		known[n] = true
 	}
 	for _, p := range listProfiles(r.tool) {
-		if known[p.Name] {
+		if !known[p.Name] {
+			r.order = append(r.order, p.Name)
+			r.tokens[p.Name] = loadClaudeToken(r.tool, p.Name)
+			r.accounts[p.Name] = p.Account
 			continue
 		}
-		r.order = append(r.order, p.Name)
-		r.tokens[p.Name] = loadClaudeToken(r.tool, p.Name)
-		r.accounts[p.Name] = p.Account
+		if r.dead[p.Name] {
+			fresh := loadClaudeToken(r.tool, p.Name)
+			old := r.tokens[p.Name]
+			if fresh != nil && (old == nil || old.Access != fresh.Access || old.Refresh != fresh.Refresh) {
+				r.tokens[p.Name] = fresh
+				delete(r.dead, p.Name)
+				log.Printf("am: %s re-logged in — cleared dead-refresh flag", p.Name)
+			}
+		}
 	}
 }
 
@@ -321,9 +335,15 @@ func (r *rotator) token() string {
 			return live.Access
 		}
 		// Keychain holds a different account than the profile we think is
-		// active — install the active profile so they line up.
+		// active — install the active profile so they line up. This also
+		// refreshes the profile's token if it was expired/rotated-out, so
+		// re-read the keychain afterward rather than trusting the (possibly
+		// stale) bundle token we cached at load().
 		if fallback != nil && fallback.Access != "" {
 			installActiveProfile(name)
+			if refreshed := liveKeychainToken(); refreshed != nil {
+				return refreshed.Access
+			}
 			return fallback.Access
 		}
 		return live.Access
@@ -399,7 +419,45 @@ func (r *rotator) observe(resp *http.Response) {
 	}
 }
 
+// periodicSnapshot keeps the active profile's bundle in sync with whatever
+// Claude Code has rotated into the live keychain. Refresh tokens are
+// single-use / rotate-on-use, so the only way to keep a backgrounded
+// account's bundle usable is to capture the rotation the moment it happens,
+// while that account is still active — waiting until it's switched back in
+// is too late, the old refresh token is already burned by then.
+func (r *rotator) periodicSnapshot() {
+	t := time.NewTicker(5 * time.Minute)
+	defer t.Stop()
+	for range t.C {
+		r.snapshotActiveIfChanged()
+	}
+}
+
+func (r *rotator) snapshotActiveIfChanged() {
+	r.mu.Lock()
+	name := r.order[r.idx]
+	r.mu.Unlock()
+	live := liveKeychainToken()
+	if live == nil {
+		return
+	}
+	saved := loadClaudeToken(r.tool, name)
+	if saved != nil && saved.Access == live.Access && saved.Refresh == live.Refresh {
+		return // nothing changed, don't touch disk
+	}
+	cmdSave(r.tool, name)
+	r.mu.Lock()
+	r.tokens[name] = live
+	r.mu.Unlock()
+	log.Printf("am: re-synced %s bundle (token rotated while active)", name)
+}
+
 func (r *rotator) rotate(from, reason string) {
+	// Capture whatever Claude Code last rotated into the keychain for `from`
+	// before we overwrite it with the next account's creds — otherwise a
+	// refresh token rotation that happened while `from` was active is lost.
+	r.snapshotActiveIfChanged()
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.order[r.idx] != from {
@@ -416,20 +474,29 @@ func (r *rotator) rotate(from, reason string) {
 		if cd, ok := r.cooldown[cand]; ok && time.Now().Before(cd) {
 			continue
 		}
+		if r.dead[cand] {
+			continue // refresh token confirmed dead; skip until re-login clears it
+		}
+		if !installActiveProfile(cand) { // put cand's creds on the system so Claude Code follows
+			r.dead[cand] = true
+			log.Printf("ROTATE (%s): %s -> %s refresh dead, blacklisting until re-login", reason, from, cand)
+			continue
+		}
 		r.idx = (r.idx + step) % n
 		r.switches++
 		r.lastSwitch = time.Now()
 		writeActivePointer(r.tool, cand)
-		installActiveProfile(cand) // put cand's creds on the system so Claude Code follows
 		log.Printf("ROTATE (%s): %s -> %s", reason, from, cand)
 		return
 	}
-	log.Printf("ROTATE (%s): %s -> (all accounts cooling down; staying)", reason, from)
+	log.Printf("ROTATE (%s): %s -> (all accounts cooling down or dead; staying)", reason, from)
 }
 
 // forceSwitch makes the named profile active immediately (next request uses it).
 // Empty name = advance to the next profile in rotation order.
 func (r *rotator) forceSwitch(name string) error {
+	r.snapshotActiveIfChanged()
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if name == "" {
@@ -448,10 +515,14 @@ func (r *rotator) forceSwitch(name string) error {
 	}
 	target := r.order[r.idx]
 	delete(r.cooldown, target) // manual switch clears any cooldown on the target
+	delete(r.dead, target)     // ...and any dead-refresh blacklist; user is vouching for it
 	r.switches++
 	r.lastSwitch = time.Now()
 	writeActivePointer(r.tool, target)
-	installActiveProfile(target)
+	if !installActiveProfile(target) {
+		r.dead[target] = true
+		return fmt.Errorf("refresh token for %q is dead — log into it again before switching to it", target)
+	}
 	log.Printf("MANUAL SWITCH -> %s", target)
 	return nil
 }
@@ -475,6 +546,9 @@ func (r *rotator) status() map[string]any {
 		}
 		if cd, ok := r.cooldown[n]; ok && time.Now().Before(cd) {
 			m["cooldown_until"] = cd
+		}
+		if r.dead[n] {
+			m["dead"] = true
 		}
 		accts = append(accts, m)
 	}
@@ -535,12 +609,13 @@ func cmdStatus() {
 		Tool     string `json:"tool"`
 		Switches int    `json:"switches"`
 		Accounts []struct {
-			Profile    string   `json:"profile"`
-			Account    string   `json:"account"`
-			Active     bool     `json:"active"`
-			Remaining  float64  `json:"remaining"`
-			LimitReset string   `json:"limit_reset"`
-			Cooldown   string   `json:"cooldown_until"`
+			Profile    string  `json:"profile"`
+			Account    string  `json:"account"`
+			Active     bool    `json:"active"`
+			Remaining  float64 `json:"remaining"`
+			LimitReset string  `json:"limit_reset"`
+			Cooldown   string  `json:"cooldown_until"`
+			Dead       bool    `json:"dead"`
 		} `json:"accounts"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
@@ -565,6 +640,9 @@ func cmdStatus() {
 			if t, e := time.Parse(time.RFC3339, a.Cooldown); e == nil {
 				line += "   (cooldown until " + t.Local().Format("15:04") + ")"
 			}
+		}
+		if a.Dead {
+			line += "   (refresh dead — re-login to restore)"
 		}
 		fmt.Println(line)
 	}
