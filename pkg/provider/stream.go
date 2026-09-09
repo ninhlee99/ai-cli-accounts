@@ -3,7 +3,7 @@ package provider
 import (
 	"context"
 
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/types"
 )
 
 func sendChunk(ctx context.Context, ch chan<- types.StreamChunk, chunk types.StreamChunk) bool {

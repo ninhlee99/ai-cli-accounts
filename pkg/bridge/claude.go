@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"ai-cli-accounts/pkg/router"
-	"ai-cli-accounts/pkg/types"
-	"ai-cli-accounts/pkg/usage"
+	"amux-accounts/pkg/router"
+	"amux-accounts/pkg/types"
+	"amux-accounts/pkg/usage"
 )
 
 // poolAccountLabel returns a label for `am usage`'s account column when a

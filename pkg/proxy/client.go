@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"ai-cli-accounts/pkg/profile"
+	"amux-accounts/pkg/profile"
 )
 
 func ProxyBase() string {
@@ -69,6 +69,16 @@ func CmdProxyUp() {
 		postAndClose(fmt.Sprintf("%s/_am/session?pid=%d&event=start&op=start", ProxyBase(), ppid))
 	}
 	postAndClose(ProxyBase() + "/_am/sync")
+}
+
+// Sync hot-reloads the running proxy daemon's provider pool (and active
+// profile) from disk, if one is up. No-op when the proxy isn't running —
+// callers that also mutate accounts.json/profiles directly on disk don't
+// need to do anything else, the next `am proxy up` picks up the change too.
+func Sync() {
+	if ProxyUp() {
+		postAndClose(ProxyBase() + "/_am/sync")
+	}
 }
 
 func postAndClose(url string) {

@@ -55,7 +55,31 @@ func lookupProjectDir(port string) string {
 	if pid <= 0 {
 		return ""
 	}
-	return lookupCwd(pid)
+	dir := lookupCwd(pid)
+	if dir == "" {
+		return dir
+	}
+	return gitRootOrSelf(dir)
+}
+
+// gitRootOrSelf resolves dir to its enclosing git repository root, so usage
+// run from a subdirectory of a repo (rather than the repo's own top level)
+// is still attributed to the repo instead of that subfolder's name — e.g.
+// ProjectLabel (usage.go) does filepath.Base(dir), and a raw client cwd of
+// ".../amux/pkg/usage" would otherwise label usage "usage" instead of
+// "amux". Falls back to dir unchanged when it isn't inside a git repo (or
+// git isn't on PATH); the caller's own cache (projCache, projectCacheTTL)
+// already covers this from running on every proxied request.
+func gitRootOrSelf(dir string) string {
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return dir
+	}
+	root := strings.TrimSpace(string(out))
+	if root == "" {
+		return dir
+	}
+	return root
 }
 
 func lookupClientPID(port string) int {

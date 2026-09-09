@@ -15,8 +15,9 @@ func TestToolAndName(t *testing.T) {
 		{[]string{"user@gmail.com"}, "claude", "user@gmail.com"},
 		{[]string{"codex", "personal"}, "codex", "personal"},
 		{[]string{"gemini", "my-key"}, "gemini", "my-key"},
-		{[]string{"claude1"}, "claude", "claude1"},
-		{[]string{"codex2"}, "codex", "codex2"},
+		{[]string{"claude1"}, "claude", "claude1"}, // not a unified ID, just a plain name -> default tool
+		{[]string{"codexcli:01"}, "codex", "codexcli:01"},
+		{[]string{"geminicli:02"}, "antigravity", "geminicli:02"},
 	}
 
 	for _, tt := range tests {

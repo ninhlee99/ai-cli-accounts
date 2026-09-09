@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/types"
 )
 
 // rateLimitCooldown is how long an adapter sits out after answering with a

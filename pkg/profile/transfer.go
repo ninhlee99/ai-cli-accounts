@@ -17,8 +17,8 @@ import (
 	"strings"
 	"time"
 
-	"ai-cli-accounts/pkg/auth"
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/auth"
+	"amux-accounts/pkg/types"
 	"golang.org/x/crypto/scrypt"
 	"golang.org/x/term"
 )

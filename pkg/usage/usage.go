@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/types"
 )
 
 func LoadUsageEntries(from time.Time) []types.UsageEntry {

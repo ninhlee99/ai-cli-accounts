@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/types"
 )
 
 func TestProvider_ResolveSecret(t *testing.T) {
@@ -155,5 +155,138 @@ func TestBuildAdapter_DefaultsAndMissing(t *testing.T) {
 	ddg := a2.(*DuckDuckGoAdapter)
 	if ddg.TargetModel != "claude-3-haiku-20240307" {
 		t.Errorf("expected default duckduckgo model, got %s", ddg.TargetModel)
+	}
+}
+
+func TestProvider_MigrateLegacyIDs(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "am-provider-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+	cfgPath := filepath.Join(tmpDir, "accounts.json")
+
+	f := &AccountsFile{Providers: []ProviderConfig{
+		{ID: "claude-web", Type: "claude_web", Priority: 6},
+		{ID: "chatgpt-web", Type: "chatgpt_web", Priority: 5},
+		{ID: "my-custom-provider", Type: "openai_compatible", Priority: 10},
+	}}
+	if err := SaveConfigFile(cfgPath, f); err != nil {
+		t.Fatalf("SaveConfigFile failed: %v", err)
+	}
+
+	if err := MigrateLegacyIDs(cfgPath); err != nil {
+		t.Fatalf("MigrateLegacyIDs failed: %v", err)
+	}
+
+	got, err := LoadConfigFile(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfigFile failed: %v", err)
+	}
+	want := map[string]string{
+		"claude_web":        "claudeweb:01",
+		"chatgpt_web":       "chatgptweb:01",
+		"openai_compatible": "my-custom-provider", // untouched: not a legacy literal ID
+	}
+	for _, p := range got.Providers {
+		if p.ID != want[p.Type] {
+			t.Errorf("provider type %q: ID = %q, want %q", p.Type, p.ID, want[p.Type])
+		}
+	}
+
+	// Idempotent: running again on already-migrated IDs changes nothing.
+	if err := MigrateLegacyIDs(cfgPath); err != nil {
+		t.Fatalf("second MigrateLegacyIDs failed: %v", err)
+	}
+	again, err := LoadConfigFile(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfigFile (2nd) failed: %v", err)
+	}
+	for i, p := range again.Providers {
+		if p.ID != got.Providers[i].ID {
+			t.Errorf("second migration changed ID: %q -> %q", got.Providers[i].ID, p.ID)
+		}
+	}
+}
+
+func TestProvider_SetPriority(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "am-provider-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+	cfgPath := filepath.Join(tmpDir, "accounts.json")
+
+	if err := AddOrUpdateProvider(cfgPath, ProviderConfig{ID: "claudeweb:01", Type: "claude_web", Priority: 6}); err != nil {
+		t.Fatalf("AddOrUpdateProvider failed: %v", err)
+	}
+
+	// Existing ID: updates in place.
+	if err := SetPriority(cfgPath, "claudeweb:01", 9); err != nil {
+		t.Fatalf("SetPriority (existing) failed: %v", err)
+	}
+	f, _ := LoadConfigFile(cfgPath)
+	if len(f.Providers) != 1 || f.Providers[0].Priority != 9 {
+		t.Fatalf("expected priority 9, got %+v", f.Providers)
+	}
+
+	// codexcli-shaped ID with no existing row: inserted as a bare placeholder.
+	if err := SetPriority(cfgPath, "codexcli:01", 4); err != nil {
+		t.Fatalf("SetPriority (codex placeholder) failed: %v", err)
+	}
+	f, _ = LoadConfigFile(cfgPath)
+	if len(f.Providers) != 2 {
+		t.Fatalf("expected 2 providers after codex placeholder insert, got %d", len(f.Providers))
+	}
+	found := false
+	for _, p := range f.Providers {
+		if p.ID == "codexcli:01" {
+			found = true
+			if p.Type != "codex_cli" || p.Priority != 4 {
+				t.Errorf("codex placeholder row = %+v, want type=codex_cli priority=4", p)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected a codexcli:01 row to be inserted, got %+v", f.Providers)
+	}
+
+	// Unknown, non-codex ID: errors instead of silently inserting.
+	if err := SetPriority(cfgPath, "does-not-exist", 1); err == nil {
+		t.Errorf("expected error for unknown non-codex id")
+	}
+}
+
+func TestProvider_IsConfigured(t *testing.T) {
+	// Unconfigured openai_compatible (missing or unset env)
+	p1 := ProviderConfig{Type: "openai_compatible", APIKey: "env:UNSET_KEY_9999"}
+	if p1.IsConfigured() {
+		t.Errorf("expected unset env key to be unconfigured")
+	}
+
+	// Configured openai_compatible
+	p2 := ProviderConfig{Type: "openai_compatible", APIKey: "sk-real-key"}
+	if !p2.IsConfigured() {
+		t.Errorf("expected literal key to be configured")
+	}
+
+	// Unconfigured chatgpt_web
+	p3 := ProviderConfig{Type: "chatgpt_web", SessionToken: "env:UNSET_TOK_9999"}
+	if p3.IsConfigured() {
+		t.Errorf("expected unset session token to be unconfigured")
+	}
+
+	// Disabled duckduckgo
+	f := false
+	p4 := ProviderConfig{Type: "duckduckgo", Enabled: &f}
+	if p4.IsConfigured() {
+		t.Errorf("expected disabled duckduckgo to be unconfigured")
+	}
+
+	// Enabled duckduckgo
+	tr := true
+	p5 := ProviderConfig{Type: "duckduckgo", Enabled: &tr}
+	if !p5.IsConfigured() {
+		t.Errorf("expected enabled duckduckgo to be configured")
 	}
 }

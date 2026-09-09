@@ -14,12 +14,12 @@ import (
 	"sync"
 	"time"
 
-	"ai-cli-accounts/pkg/bridge"
-	"ai-cli-accounts/pkg/profile"
-	"ai-cli-accounts/pkg/provider"
-	"ai-cli-accounts/pkg/router"
-	"ai-cli-accounts/pkg/types"
-	"ai-cli-accounts/pkg/usage"
+	"amux-accounts/pkg/bridge"
+	"amux-accounts/pkg/profile"
+	"amux-accounts/pkg/provider"
+	"amux-accounts/pkg/router"
+	"amux-accounts/pkg/types"
+	"amux-accounts/pkg/usage"
 )
 
 type ProxyMode struct {
@@ -59,16 +59,7 @@ func RunProxy(addr, upstream string) error {
 	life := NewLifecycle()
 	mode := &ProxyMode{}
 
-	adapters, err := provider.LoadAccounts(provider.DefaultAccountsPath())
-	if err != nil || len(adapters) == 0 {
-		adapters = []types.ProviderAdapter{
-			&provider.DuckDuckGoAdapter{
-				AdapterID:   "duckduckgo",
-				TargetModel: "claude-3-haiku-20240307",
-				PriorityLvl: 99,
-			},
-		}
-	}
+	adapters, _ := provider.LoadAccounts(provider.DefaultAccountsPath())
 	pool := router.NewAccountPoolRouter(adapters)
 
 	rp, err := newReverseProxy(upstream, rot)

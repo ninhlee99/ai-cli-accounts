@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/types"
 )
 
 const googleAIStudioBaseURL = "https://generativelanguage.googleapis.com/v1beta/openai"

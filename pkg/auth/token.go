@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/types"
 )
 
 const (

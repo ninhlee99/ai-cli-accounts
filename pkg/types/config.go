@@ -51,5 +51,9 @@ func DefaultToolConfig() ToolConfig {
 			{Kind: "file", Path: j(".gemini/google_accounts.json"), Optional: true, AccountField: "active"},
 			{Kind: "file", Path: j(".gemini/installation_id"), Optional: true},
 		}},
+		// antigravity is a placeholder: no login-detection artifacts yet, so
+		// it always shows up as "not logged in" / "(none — am add antigravity)"
+		// until real detection logic exists for it.
+		"antigravity": {Name: "antigravity", Artifacts: []Artifact{}},
 	}}
 }

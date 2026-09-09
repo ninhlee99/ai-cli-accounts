@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/types"
 )
 
 func EnvPath() string { return filepath.Join(types.BaseDir(), "env.json") }

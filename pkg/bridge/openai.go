@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"ai-cli-accounts/pkg/router"
-	"ai-cli-accounts/pkg/types"
-	"ai-cli-accounts/pkg/usage"
+	"amux-accounts/pkg/router"
+	"amux-accounts/pkg/types"
+	"amux-accounts/pkg/usage"
 )
 
 // HandleChatCompletions handles standard OpenAI /v1/chat/completions requests.
@@ -200,7 +200,7 @@ func HandleModels(w http.ResponseWriter, r *http.Request) {
 			"id":       m,
 			"object":   "model",
 			"created":  1700000000,
-			"owned_by": "ai-cli-accounts",
+			"owned_by": "amux-accounts",
 		})
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{

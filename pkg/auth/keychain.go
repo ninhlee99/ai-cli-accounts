@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/types"
 )
 
 // KCGet retrieves a password item from macOS Keychain.

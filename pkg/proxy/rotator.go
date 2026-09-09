@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"ai-cli-accounts/pkg/auth"
-	"ai-cli-accounts/pkg/profile"
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/auth"
+	"amux-accounts/pkg/profile"
+	"amux-accounts/pkg/types"
 )
 
 const (

@@ -7,9 +7,9 @@ import (
 	"os"
 	"strings"
 
-	"ai-cli-accounts/pkg/provider"
-	"ai-cli-accounts/pkg/router"
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/provider"
+	"amux-accounts/pkg/router"
+	"amux-accounts/pkg/types"
 )
 
 // CmdChat runs a standalone terminal chat session backed by the pool router.

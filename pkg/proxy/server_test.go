@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"ai-cli-accounts/pkg/router"
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/router"
+	"amux-accounts/pkg/types"
 )
 
 // stubAdapter is a minimal types.ProviderAdapter for exercising the pool

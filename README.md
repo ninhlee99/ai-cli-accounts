@@ -35,7 +35,7 @@
 
 ### 1. Cài đặt tự động (macOS):
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ninhlee99/ai-cli-accounts/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ninhlee99/amux/main/install.sh | sh
 ```
 > *Yêu cầu: macOS, Go 1.22+ và Git. Script sẽ cài đặt song song cả 2 lệnh alias **`amux`** và **`am`** vào `/usr/local/bin` (bạn gõ lệnh nào cũng được).*
 
@@ -43,8 +43,9 @@ curl -fsSL https://raw.githubusercontent.com/ninhlee99/ai-cli-accounts/main/inst
 1. Mở terminal và chạy `claude` — tài khoản hiện tại sẽ được tự động snapshot vào hệ thống.
 2. Để thêm tài khoản mới: gõ `/login` trong Claude Code, sau đó mở một tab terminal mới — hệ thống sẽ tự phát hiện và thêm tài khoản vào danh sách xoay vòng.
 
-* **Nâng cấp:** Chạy lại lệnh cài đặt bên trên.
-* **Gỡ cài đặt:** `am hook uninstall && rm -f /usr/local/bin/am /usr/local/bin/amux`
+* **Tự động cập nhật:** `am setup --auto-update` (tự động kiểm tra và nâng cấp khi có bản mới)
+* **Nâng cấp thủ công:** `am update` (hoặc chạy lại lệnh cài đặt bên trên).
+* **Gỡ cài đặt:** `am hook uninstall && rm -f /usr/local/bin/am /usr/local/bin/amux ~/.local/bin/am ~/.local/bin/amux`
 
 ---
 
@@ -74,7 +75,9 @@ curl -fsSL https://raw.githubusercontent.com/ninhlee99/ai-cli-accounts/main/inst
 ### Giám Sát & Tiện Ích
 | Lệnh | Mô Tả |
 | :--- | :--- |
-| `am status` | Xem trạng thái proxy daemon, các tab đang kết nối và quota |
+| `am setup [--auto-update]` | Cài đặt Claude hook, slash command & kích hoạt tự động cập nhật |
+| `am update` | Nâng cấp amux lên bản mới nhất từ GitHub (giữ nguyên toàn bộ tài khoản) |
+| `am status` | Xem trạng thái proxy daemon, auto-update, các tab kết nối và quota |
 | `am usage [day\|week\|month]` | Thống kê số lượng token sử dụng (thêm `-D` để xem chi tiết) |
 | `am proxy [up\|down]` | Khởi động hoặc dừng proxy daemon chạy nền |
 | `am env` | Xuất biến môi trường trỏ vào proxy (`eval "$(am env)"`) |

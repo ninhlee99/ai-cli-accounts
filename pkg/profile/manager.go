@@ -16,8 +16,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"ai-cli-accounts/pkg/auth"
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/auth"
+	"amux-accounts/pkg/types"
 )
 
 func ProfileDir(tool string) string {
@@ -46,6 +46,27 @@ func WriteActivePointer(tool, name string) {
 	_ = os.WriteFile(ActivePath(tool), []byte(name), 0o600)
 }
 
+// profileIDPrefix maps a Profile-system tool name to the unified ID prefix
+// used for its profiles (see types.FormatID). Tools not listed here fall
+// back to "<tool>cli" so a future tool never ends up with a blank/panicking
+// prefix.
+var profileIDPrefix = map[string]string{
+	"claude":      "claudecli",
+	"codex":       "codexcli",
+	"gemini":      "geminiweb",
+	"antigravity": "geminicli",
+}
+
+// IDPrefixForTool returns the unified-ID prefix for a Profile-system tool
+// (e.g. "claude" -> "claudecli"). Exported so callers like cli.toolAndName
+// can recognize a bare ID's tool without duplicating the prefix table.
+func IDPrefixForTool(tool string) string {
+	if p, ok := profileIDPrefix[tool]; ok {
+		return p
+	}
+	return tool + "cli"
+}
+
 func ListProfiles(tool string) []types.ProfileMeta {
 	des, _ := os.ReadDir(ProfileDir(tool))
 	var out []types.ProfileMeta
@@ -68,8 +89,9 @@ func ListProfiles(tool string) []types.ProfileMeta {
 		}
 		return out[i].Name < out[j].Name
 	})
+	prefix := IDPrefixForTool(tool)
 	for i := range out {
-		out[i].ID = fmt.Sprintf("%s%d", tool, i+1)
+		out[i].ID = types.FormatID(prefix, i+1)
 	}
 	return out
 }

@@ -3,7 +3,7 @@ package bridge_test
 import (
 	"testing"
 
-	"ai-cli-accounts/pkg/bridge"
+	"amux-accounts/pkg/bridge"
 )
 
 func TestToChatRequest_SystemAndMessages(t *testing.T) {

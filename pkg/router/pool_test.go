@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
-	"ai-cli-accounts/pkg/router"
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/router"
+	"amux-accounts/pkg/types"
 )
 
 type mockAdapter struct {
@@ -60,6 +60,40 @@ func TestAccountPoolRouter_Failover(t *testing.T) {
 	}
 	if !status[0]["cooling"].(bool) {
 		t.Fatalf("expected provider-1 to be cooling")
+	}
+}
+
+// TestAccountPoolRouter_MultiSessionFailover locks in the multi-session
+// scenario Phase 3/4 unlock: two accounts of the *same* provider type
+// (unified IDs sharing a prefix, e.g. from a second `am login claude`)
+// failing over to each other exactly like two different provider types do —
+// the router itself needs no ID-format awareness at all.
+func TestAccountPoolRouter_MultiSessionFailover(t *testing.T) {
+	session1 := &mockAdapter{id: "claudeweb:01", priority: 1, err: types.ErrRateLimitReached}
+	session2 := &mockAdapter{id: "claudeweb:02", priority: 2, content: "hello from session 2"}
+
+	r := router.NewAccountPoolRouter([]types.ProviderAdapter{session1, session2})
+	ch, err := r.Send(context.Background(), &types.ChatRequest{
+		Messages: []types.ChatMessage{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+
+	var text string
+	for chunk := range ch {
+		text += chunk.Content
+	}
+	if text != "hello from session 2" {
+		t.Fatalf("expected failover to claudeweb:02, got %q", text)
+	}
+
+	status := r.Status()
+	if len(status) != 2 {
+		t.Fatalf("expected 2 providers in status, got %d", len(status))
+	}
+	if !status[0]["cooling"].(bool) {
+		t.Fatalf("expected claudeweb:01 to be cooling after rate limit")
 	}
 }
 
