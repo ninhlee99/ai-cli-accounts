@@ -25,6 +25,7 @@ type usageEntry struct {
 	Time    time.Time `json:"t"`
 	Account string    `json:"account"`
 	Model   string    `json:"model,omitempty"`
+	Project string    `json:"project,omitempty"`
 	Input   int       `json:"in"`
 	Output  int       `json:"out"`
 }
@@ -61,8 +62,13 @@ func wrapUsageCapture(resp *http.Response, account string) {
 		io.Closer
 	}{io.TeeReader(orig, pw), orig}
 
+	project := ""
+	if resp.Request != nil {
+		project = projectForRemoteAddr(resp.Request.RemoteAddr)
+	}
+
 	go func() {
-		e := usageEntry{Time: time.Now(), Account: account}
+		e := usageEntry{Time: time.Now(), Account: account, Project: project}
 		parseUsageStream(pr, &e)
 		_ = pr.CloseWithError(io.EOF)
 		if e.Input > 0 || e.Output > 0 {
@@ -194,6 +200,7 @@ func cmdUsage(args []string) {
 	entries := loadUsageEntries()
 	byAccount := map[string]*usageAgg{}
 	byModel := map[string]*usageAgg{}
+	byProject := map[string]*usageAgg{}
 	var totalIn, totalOut, totalReqs int
 	for _, e := range entries {
 		if !since.IsZero() && e.Time.Before(since) {
@@ -201,6 +208,7 @@ func cmdUsage(args []string) {
 		}
 		bump(byAccount, e.Account, e)
 		bump(byModel, orDash(e.Model), e)
+		bump(byProject, projectLabel(e.Project), e)
 		totalIn += e.Input
 		totalOut += e.Output
 		totalReqs++
@@ -221,10 +229,24 @@ func cmdUsage(args []string) {
 	fmt.Println()
 	fmt.Println("by model:")
 	printUsageTable(byModel)
+	fmt.Println()
+	fmt.Println("by project:")
+	printUsageTable(byProject)
 
 	fmt.Println()
 	fmt.Println(strings.Repeat("-", 66))
 	fmt.Printf("%-30s  in %9s   out %9s   %5d req\n", "total", commas(totalIn), commas(totalOut), totalReqs)
+}
+
+// projectLabel shows the project dir's basename (e.g. "ai-cli-accounts"
+// instead of "/Users/x/Documents/apps/ai-cli-accounts") — plenty to tell
+// projects apart in practice, and lsof couldn't resolve one at all shows as
+// "-" (older log entries from before project tracking, or lookup failure).
+func projectLabel(dir string) string {
+	if dir == "" {
+		return "-"
+	}
+	return filepath.Base(dir)
 }
 
 func bump(m map[string]*usageAgg, key string, e usageEntry) {
