@@ -1,8 +1,4 @@
-package main
-
-// macOS Keychain access via the `security` CLI. We deliberately avoid a library
-// here: Claude Code stores its credential as a raw JSON string, and libraries
-// like go-keyring wrap the value (base64 + prefix), which would corrupt it.
+package auth
 
 import (
 	"bytes"
@@ -10,9 +6,12 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"ai-cli-accounts/pkg/types"
 )
 
-func kcGet(service, account string) (string, error) {
+// KCGet retrieves a password item from macOS Keychain.
+func KCGet(service, account string) (string, error) {
 	args := []string{"find-generic-password", "-s", service, "-w"}
 	if account != "" {
 		args = append(args, "-a", account)
@@ -26,8 +25,8 @@ func kcGet(service, account string) (string, error) {
 	return strings.TrimRight(out.String(), "\n"), nil
 }
 
-// kcAccount reads the existing item's account attribute, if any.
-func kcAccount(service string) string {
+// KCAccount reads the existing item's account attribute, if any.
+func KCAccount(service string) string {
 	cmd := exec.Command("security", "find-generic-password", "-s", service)
 	out, err := cmd.Output()
 	if err != nil {
@@ -43,16 +42,16 @@ func kcAccount(service string) string {
 	return ""
 }
 
-func kcSet(service, account, secret string) error {
+// KCSet writes or updates a generic-password item in macOS Keychain.
+func KCSet(service, account, secret string) error {
 	if account == "" {
-		if a := kcAccount(service); a != "" {
+		if a := KCAccount(service); a != "" {
 			account = a
 		} else {
-			account = currentUser()
+			account = types.CurrentUser()
 		}
 	}
-	// -X takes the password as a hex string, sidestepping any argv quoting
-	// problems with JSON braces / quotes / newlines in the secret.
+	// -X takes the password as a hex string, sidestepping argv quoting issues.
 	args := []string{
 		"add-generic-password", "-U",
 		"-s", service, "-a", account,

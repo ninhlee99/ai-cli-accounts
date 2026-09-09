@@ -1,0 +1,47 @@
+{
+  "providers": [
+    {
+      "id": "github-models",
+      "type": "openai_compatible",
+      "priority": 1,
+      "baseUrl": "https://models.github.ai/inference",
+      "apiKey": "env:GITHUB_MODELS_TOKEN",
+      "model": "gpt-4o"
+    },
+    {
+      "id": "google-ai-studio",
+      "type": "openai_compatible",
+      "priority": 2,
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "apiKey": "env:GOOGLE_AI_STUDIO_KEY",
+      "model": "gemini-2.0-flash"
+    },
+    {
+      "id": "groq",
+      "type": "openai_compatible",
+      "priority": 3,
+      "baseUrl": "https://api.groq.com/openai/v1",
+      "apiKey": "env:GROQ_API_KEY",
+      "model": "llama-3.3-70b-versatile"
+    },
+    {
+      "id": "duckduckgo",
+      "type": "duckduckgo",
+      "priority": 4,
+      "model": "claude-3-haiku-20240307"
+    },
+    {
+      "id": "chatgpt-web",
+      "type": "chatgpt_web",
+      "priority": 5,
+      "sessionToken": "env:CHATGPT_SESSION_TOKEN"
+    },
+    {
+      "id": "claude-web",
+      "type": "claude_web",
+      "priority": 6,
+      "sessionKey": "env:CLAUDE_SESSION_KEY",
+      "model": "claude-3-5-sonnet-20241022"
+    }
+  ]
+}

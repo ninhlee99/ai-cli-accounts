@@ -1,4 +1,4 @@
-package main
+package usage
 
 import (
 	"net"
@@ -9,15 +9,6 @@ import (
 	"sync"
 	"time"
 )
-
-// am usage --by-project needs to know which claude tab a request came from.
-// All tabs share one proxy port, so requests carry no project identity of
-// their own — but each tab holds its own TCP connection to the proxy, and
-// the OS can map that connection's client-side ephemeral port back to the
-// owning process, then that process's cwd. Both lookups go through lsof
-// (macOS has no /proc): slow-ish (~10-30ms) so results are cached per
-// remote address for a while, since a connection is held open and reused
-// for many requests.
 
 type projectCache struct {
 	mu     sync.Mutex
@@ -37,10 +28,8 @@ var projCache = &projectCache{
 
 const projectCacheTTL = 2 * time.Minute
 
-// projectForRemoteAddr resolves a client connection's cwd (e.g.
-// "/Users/x/code/foo" -> "foo") from its RemoteAddr ("127.0.0.1:65022").
-// Returns "" on any failure — this is best-effort, never blocks a request.
-func projectForRemoteAddr(remoteAddr string) string {
+// ProjectForRemoteAddr resolves a client connection's cwd from RemoteAddr.
+func ProjectForRemoteAddr(remoteAddr string) string {
 	host, portStr, err := net.SplitHostPort(remoteAddr)
 	if err != nil || (host != "127.0.0.1" && host != "::1" && host != "localhost") {
 		return ""
@@ -69,8 +58,6 @@ func lookupProjectDir(port string) string {
 	return lookupCwd(pid)
 }
 
-// lookupClientPID finds the PID on the other end of the connection whose
-// client-side port is `port` — i.e. not this am process itself.
 func lookupClientPID(port string) int {
 	out, err := exec.Command("lsof", "-iTCP:"+port, "-sTCP:ESTABLISHED", "-Fp").Output()
 	if err != nil {

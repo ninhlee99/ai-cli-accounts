@@ -1,6 +1,5 @@
-am
 /am
-ai-cli-accounts
+/ai-cli-accounts
 .am/
 *.amexp
 all-account*
