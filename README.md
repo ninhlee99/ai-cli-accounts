@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="amux logo" width="160" />
+  <img src="assets/logo.svg" alt="amux logo" width="160" />
 </p>
 
 <h1 align="center">amux (<code>am</code>)</h1>
@@ -12,7 +12,7 @@
 <p align="center">
   <a href="#-tính-năng-cốt-lõi">Tính Năng</a> •
   <a href="#-cài-đặt-nhanh">Cài Đặt</a> •
-  <a href="#-danh-sách-lệnh-cli-am">Lệnh CLI</a> •
+  <a href="#-danh-sách-lệnh-cli-amux--am">Lệnh CLI</a> •
   <a href="#-local-ai-gateway-http1270018787">AI Gateway</a> •
   <a href="#️-cấu-hình-provider-pool-amaccountsjson">Provider Pool</a> •
   <a href="STRUCT.md">Kiến Trúc</a>
@@ -37,18 +37,20 @@
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ninhlee99/ai-cli-accounts/main/install.sh | sh
 ```
-> *Yêu cầu: macOS, Go 1.22+ và Git. Script sẽ biên dịch binary vào `/usr/local/bin/am` và tự động kích hoạt hook.*
+> *Yêu cầu: macOS, Go 1.22+ và Git. Script sẽ cài đặt song song cả 2 lệnh alias **`amux`** và **`am`** vào `/usr/local/bin` (bạn gõ lệnh nào cũng được).*
 
 ### 2. Sử dụng ngay với Claude Code:
-1. Mở terminal và chạy `claude` — tài khoản hiện tại sẽ được tự động snapshot vào `am`.
-2. Để thêm tài khoản mới: gõ `/login` trong Claude Code, sau đó mở một tab terminal mới — `am` sẽ tự phát hiện và thêm tài khoản vào danh sách xoay vòng.
+1. Mở terminal và chạy `claude` — tài khoản hiện tại sẽ được tự động snapshot vào hệ thống.
+2. Để thêm tài khoản mới: gõ `/login` trong Claude Code, sau đó mở một tab terminal mới — hệ thống sẽ tự phát hiện và thêm tài khoản vào danh sách xoay vòng.
 
 * **Nâng cấp:** Chạy lại lệnh cài đặt bên trên.
-* **Gỡ cài đặt:** `am hook uninstall && rm -f /usr/local/bin/am`
+* **Gỡ cài đặt:** `am hook uninstall && rm -f /usr/local/bin/am /usr/local/bin/amux`
 
 ---
 
-## 📋 Danh Sách Lệnh CLI (`am`)
+## 📋 Danh Sách Lệnh CLI (`amux` / `am`)
+
+> 💡 **Mẹo:** Bạn có thể dùng `amux` hoặc `am` thay thế cho nhau (ví dụ: `amux sw` tương đương `am sw`).
 
 ### Quản Lý Tài Khoản & Profile
 | Lệnh | Mô Tả |

@@ -30,12 +30,14 @@ say "building am..."
 
 if [ -w "$INSTALL_DIR" ]; then
   mv "$tmp/ai-cli-accounts/am" "$INSTALL_DIR/am"
+  ln -sf "$INSTALL_DIR/am" "$INSTALL_DIR/amux"
 else
   say "need sudo to write to $INSTALL_DIR..."
   sudo mv "$tmp/ai-cli-accounts/am" "$INSTALL_DIR/am"
+  sudo ln -sf "$INSTALL_DIR/am" "$INSTALL_DIR/amux"
 fi
 
-say "installed am -> $INSTALL_DIR/am"
+say "installed am & amux -> $INSTALL_DIR"
 
 if command -v am >/dev/null 2>&1; then
   say "running 'am setup' (hook + /am:feedback slash command)..."
