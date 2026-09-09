@@ -95,7 +95,11 @@ func runProxyForeground(args []string) {
 				log.Printf("%s %s -> %s", r.Method, r.URL.Path, rot.active())
 			}
 		},
-		ModifyResponse: func(resp *http.Response) error { rot.observe(resp); return nil },
+		ModifyResponse: func(resp *http.Response) error {
+			rot.observe(resp)
+			wrapUsageCapture(resp, rot.active())
+			return nil
+		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Printf("proxy error: %v", err)
 			http.Error(w, "am proxy: upstream error", http.StatusBadGateway)
@@ -225,8 +229,19 @@ type token struct {
 	Refresh   string
 	ExpiresAt time.Time
 	account   string
-	remaining float64 // last seen unified-remaining fraction/count (-1 unknown)
+	remaining float64 // last seen unified-remaining fraction/count (-1 unknown) — drives rotation
 	resetAt   time.Time
+
+	// Separate 5h/7d windows, straight from anthropic-ratelimit-unified-{5h,7d}-*
+	// headers (Claude Code's own /usage draws from the same two). -1 = unknown.
+	fiveH  window
+	sevenD window
+}
+
+type window struct {
+	used    float64 // utilization, 0..1
+	resetAt time.Time
+	known   bool
 }
 
 const (
@@ -362,48 +377,60 @@ func (r *rotator) metaAccount(name string) string {
 }
 
 // observe reads rate-limit headers off each response and rotates if needed.
+//
+// Anthropic reports two independent windows per account — 5h and 7d — via
+// anthropic-ratelimit-unified-{5h,7d}-{utilization,reset}. This is the same
+// data Claude Code's own `/usage` reads, so `am status` mirrors it exactly
+// instead of re-deriving a fraction from remaining/limit counts (which some
+// window variants don't send). Rotation still keys off the 5h window: it's
+// the one that actually blocks the very next request.
 func (r *rotator) observe(resp *http.Response) {
 	r.mu.Lock()
 	name := r.order[r.idx]
 	t := r.tokens[name]
 	r.mu.Unlock()
+	if t == nil {
+		return
+	}
 
 	h := resp.Header
-	rem, remOK := parseFirstFloat(h,
-		"anthropic-ratelimit-unified-remaining",
-		"anthropic-ratelimit-unified-5h-remaining",
-		"anthropic-ratelimit-requests-remaining",
-	)
-	lim, limOK := parseFirstFloat(h,
-		"anthropic-ratelimit-unified-limit",
-		"anthropic-ratelimit-unified-5h-limit",
-		"anthropic-ratelimit-requests-limit",
-	)
-	if reset := parseFirstTime(h,
-		"anthropic-ratelimit-unified-reset",
-		"anthropic-ratelimit-unified-5h-reset",
-		"anthropic-ratelimit-requests-reset",
-	); !reset.IsZero() && t != nil {
-		r.mu.Lock()
-		t.resetAt = reset
-		r.mu.Unlock()
-	}
+	fiveH := parseWindow(h, "5h")
+	sevenD := parseWindow(h, "7d")
 
+	// Fallback for older/plain responses that only send the un-suffixed
+	// unified-remaining/-limit pair (no per-window utilization).
+	rem, remOK := parseFirstFloat(h, "anthropic-ratelimit-unified-remaining", "anthropic-ratelimit-requests-remaining")
+	lim, limOK := parseFirstFloat(h, "anthropic-ratelimit-unified-limit", "anthropic-ratelimit-requests-limit")
 	frac := -1.0
 	if remOK && limOK && lim > 0 {
-		frac = rem / lim
+		frac = 1 - rem/lim
 	} else if remOK {
-		frac = rem // count-only; treat small absolute as low
-	}
-	if t != nil {
-		r.mu.Lock()
-		t.remaining = frac
-		r.mu.Unlock()
+		frac = -1 // count-only, no window total to compare against
 	}
 
+	r.mu.Lock()
+	if fiveH.known {
+		t.fiveH = fiveH
+	}
+	if sevenD.known {
+		t.sevenD = sevenD
+	}
+	switch {
+	case fiveH.known:
+		t.remaining = 1 - fiveH.used
+	case frac >= 0:
+		t.remaining = 1 - frac
+	case remOK:
+		t.remaining = rem // count-only; treat small absolute as low
+	}
+	if !t.fiveH.resetAt.IsZero() {
+		t.resetAt = t.fiveH.resetAt
+	}
+	r.mu.Unlock()
+
 	hardLimited := resp.StatusCode == http.StatusTooManyRequests
-	nearLimit := (remOK && limOK && lim > 0 && frac <= rotateThreshold) ||
-		(remOK && !limOK && rem <= 2)
+	nearLimit := (fiveH.known && fiveH.used >= 1-rotateThreshold) ||
+		(!fiveH.known && remOK && !limOK && rem <= 2)
 
 	if hardLimited || nearLimit {
 		reason := "near limit"
@@ -412,6 +439,22 @@ func (r *rotator) observe(resp *http.Response) {
 		}
 		r.rotate(name, reason)
 	}
+}
+
+// parseWindow reads anthropic-ratelimit-unified-<suffix>-{utilization,reset}
+// for one window ("5h" or "7d"). known=false when the header wasn't sent
+// (older API responses, or the un-suffixed fallback headers only).
+func parseWindow(h http.Header, suffix string) window {
+	u := strings.TrimSpace(h.Get("anthropic-ratelimit-unified-" + suffix + "-utilization"))
+	if u == "" {
+		return window{}
+	}
+	used, err := strconv.ParseFloat(u, 64)
+	if err != nil {
+		return window{}
+	}
+	reset := parseFirstTime(h, "anthropic-ratelimit-unified-"+suffix+"-reset")
+	return window{used: used, resetAt: reset, known: true}
 }
 
 // periodicSnapshot keeps the active profile's bundle in sync with whatever
@@ -538,6 +581,18 @@ func (r *rotator) status() map[string]any {
 			if !t.resetAt.IsZero() {
 				m["limit_reset"] = t.resetAt
 			}
+			if t.fiveH.known {
+				m["5h_used"] = t.fiveH.used
+				if !t.fiveH.resetAt.IsZero() {
+					m["5h_reset"] = t.fiveH.resetAt
+				}
+			}
+			if t.sevenD.known {
+				m["7d_used"] = t.sevenD.used
+				if !t.sevenD.resetAt.IsZero() {
+					m["7d_reset"] = t.sevenD.resetAt
+				}
+			}
 		}
 		if cd, ok := r.cooldown[n]; ok && time.Now().Before(cd) {
 			m["cooldown_until"] = cd
@@ -609,13 +664,17 @@ func cmdStatus() {
 		Sessions int    `json:"sessions"`
 		Upstream string `json:"upstream"`
 		Accounts []struct {
-			Profile    string  `json:"profile"`
-			Account    string  `json:"account"`
-			Active     bool    `json:"active"`
-			Remaining  float64 `json:"remaining"`
-			LimitReset string  `json:"limit_reset"`
-			Cooldown   string  `json:"cooldown_until"`
-			Dead       bool    `json:"dead"`
+			Profile     string   `json:"profile"`
+			Account     string   `json:"account"`
+			Active      bool     `json:"active"`
+			Remaining   float64  `json:"remaining"`
+			LimitReset  string   `json:"limit_reset"`
+			Cooldown    string   `json:"cooldown_until"`
+			Dead        bool     `json:"dead"`
+			FiveHUsed   *float64 `json:"5h_used"`
+			FiveHReset  string   `json:"5h_reset"`
+			SevenDUsed  *float64 `json:"7d_used"`
+			SevenDReset string   `json:"7d_reset"`
 		} `json:"accounts"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
@@ -638,14 +697,6 @@ func cmdStatus() {
 			}
 		}
 		line := fmt.Sprintf("%s%-8s  %s", mark, state, orDash(a.Account))
-		if a.Remaining >= 0 {
-			line += fmt.Sprintf("   %.0f%% left", a.Remaining*100)
-		}
-		if a.LimitReset != "" {
-			if t, e := time.Parse(time.RFC3339, a.LimitReset); e == nil {
-				line += "   resets " + t.Local().Format("15:04")
-			}
-		}
 		if a.Cooldown != "" {
 			if t, e := time.Parse(time.RFC3339, a.Cooldown); e == nil {
 				line += "   (cooldown until " + t.Local().Format("15:04") + ")"
@@ -655,7 +706,34 @@ func cmdStatus() {
 			line += "   (refresh dead — re-login to restore)"
 		}
 		fmt.Println(line)
+		if a.FiveHUsed != nil {
+			fmt.Printf("           5h limit:  %.0f%% used%s\n", *a.FiveHUsed*100, resetSuffix(a.FiveHReset))
+		}
+		if a.SevenDUsed != nil {
+			fmt.Printf("           7d limit:  %.0f%% used%s\n", *a.SevenDUsed*100, resetSuffix(a.SevenDReset))
+		}
+		if a.FiveHUsed == nil && a.SevenDUsed == nil && a.Remaining >= 0 {
+			// Older/plain response only — no per-window breakdown available yet.
+			line := fmt.Sprintf("           %.0f%% left", a.Remaining*100)
+			if a.LimitReset != "" {
+				if t, e := time.Parse(time.RFC3339, a.LimitReset); e == nil {
+					line += "   resets " + t.Local().Format("15:04")
+				}
+			}
+			fmt.Println(line)
+		}
 	}
+}
+
+func resetSuffix(iso string) string {
+	if iso == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339, iso)
+	if err != nil {
+		return ""
+	}
+	return "   resets " + t.Local().Format("Mon 15:04")
 }
 
 // cmdSwitch forces the proxy to the named account right now. The running

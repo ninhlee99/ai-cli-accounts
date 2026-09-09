@@ -57,6 +57,7 @@ session ends.
   am sw                     pick an account from a menu (↑/↓, Enter)
   am sw <id|name>           switch straight to it — no restart  (e.g. am sw claude2)
   am status                 what's active, rate limits, switch count
+  am usage [day|week|month|all]   tokens used, by account and by model
 
   am hook install|uninstall|status
   am proxy                  run the proxy in the foreground (normally automatic)
@@ -126,6 +127,8 @@ func main() {
 		cmdProxy(args[1:])
 	case "env":
 		cmdEnv(args[1:])
+	case "usage":
+		cmdUsage(args[1:])
 	case "export":
 		cmdExport(args[1:])
 	case "import":
