@@ -26,6 +26,7 @@ type usageEntry struct {
 	Account string    `json:"account"`
 	Model   string    `json:"model,omitempty"`
 	Project string    `json:"project,omitempty"`
+	Session string    `json:"session,omitempty"`
 	Input   int       `json:"in"`
 	Output  int       `json:"out"`
 }
@@ -62,13 +63,19 @@ func wrapUsageCapture(resp *http.Response, account string) {
 		io.Closer
 	}{io.TeeReader(orig, pw), orig}
 
-	project := ""
+	project, session := "", ""
 	if resp.Request != nil {
 		project = projectForRemoteAddr(resp.Request.RemoteAddr)
+		// Claude Code sends its own session UUID on every request (since
+		// v2.1.86) and mints a new one on /clear (that's a new session to
+		// Claude Code internally, not just a cleared context) — so grouping
+		// by this header gives exactly "running total per session, resets
+		// on /clear" for free, no state tracking needed on our side.
+		session = resp.Request.Header.Get("X-Claude-Code-Session-Id")
 	}
 
 	go func() {
-		e := usageEntry{Time: time.Now(), Account: account, Project: project}
+		e := usageEntry{Time: time.Now(), Account: account, Project: project, Session: session}
 		parseUsageStream(pr, &e)
 		_ = pr.CloseWithError(io.EOF)
 		if e.Input > 0 || e.Output > 0 {
@@ -201,6 +208,8 @@ func cmdUsage(args []string) {
 	byAccount := map[string]*usageAgg{}
 	byModel := map[string]*usageAgg{}
 	byProject := map[string]*usageAgg{}
+	bySession := map[string]*usageAgg{}
+	lastSeen := map[string]time.Time{}
 	var totalIn, totalOut, totalReqs int
 	for _, e := range entries {
 		if !since.IsZero() && e.Time.Before(since) {
@@ -209,6 +218,11 @@ func cmdUsage(args []string) {
 		bump(byAccount, e.Account, e)
 		bump(byModel, orDash(e.Model), e)
 		bump(byProject, projectLabel(e.Project), e)
+		sid := sessionLabel(e.Session)
+		bump(bySession, sid, e)
+		if e.Time.After(lastSeen[sid]) {
+			lastSeen[sid] = e.Time
+		}
 		totalIn += e.Input
 		totalOut += e.Output
 		totalReqs++
@@ -232,6 +246,9 @@ func cmdUsage(args []string) {
 	fmt.Println()
 	fmt.Println("by project:")
 	printUsageTable(byProject)
+	fmt.Println()
+	fmt.Println("by session (most recent first; a new one starts on /clear):")
+	printUsageTableByTime(bySession, lastSeen)
 
 	fmt.Println()
 	fmt.Println(strings.Repeat("-", 66))
@@ -269,6 +286,34 @@ func printUsageTable(m map[string]*usageAgg) {
 	for _, n := range names {
 		a := m[n]
 		fmt.Printf("  %-28s  in %9s   out %9s   %5d req\n", n, commas(a.in), commas(a.out), a.reqs)
+	}
+}
+
+// sessionLabel shortens the session UUID to 8 chars — enough to tell rows
+// apart at a glance, still greppable back to the full id in usage.log.
+func sessionLabel(id string) string {
+	if id == "" {
+		return "-"
+	}
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
+// printUsageTableByTime prints rows most-recently-active first, since a
+// session's ordinal position (unlike an account or model name) isn't
+// meaningful — what matters is which one you were just in.
+func printUsageTableByTime(m map[string]*usageAgg, lastSeen map[string]time.Time) {
+	names := make([]string, 0, len(m))
+	for n := range m {
+		names = append(names, n)
+	}
+	sort.Slice(names, func(i, j int) bool { return lastSeen[names[i]].After(lastSeen[names[j]]) })
+	for _, n := range names {
+		a := m[n]
+		fmt.Printf("  %-28s  in %9s   out %9s   %5d req   last %s\n",
+			n, commas(a.in), commas(a.out), a.reqs, lastSeen[n].Local().Format("01-02 15:04"))
 	}
 }
 
