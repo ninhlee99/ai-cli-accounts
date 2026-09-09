@@ -104,7 +104,7 @@ func hookEntryIsOurs(e any) bool {
 	hs, _ := m["hooks"].([]any)
 	for _, h := range hs {
 		hm, _ := h.(map[string]any)
-		if c, _ := hm["command"].(string); strings.Contains(c, hookTag) {
+		if c, _ := hm["command"].(string); strings.Contains(c, "proxy up") || strings.Contains(c, "proxy down") || strings.Contains(c, hookTag) {
 			return true
 		}
 	}

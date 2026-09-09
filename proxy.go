@@ -86,10 +86,26 @@ func runProxyForeground(args []string) {
 			r.URL.Scheme = target.Scheme
 			r.URL.Host = target.Host
 			r.Host = target.Host
-			r.Header.Set("Authorization", "Bearer "+rot.token())
-			r.Header.Del("X-Api-Key")
-			if !strings.Contains(r.Header.Get("anthropic-beta"), "oauth") {
-				r.Header.Add("anthropic-beta", "oauth-2025-04-20")
+			tok := rot.token()
+			if tok != "" {
+				r.Header.Set("Authorization", "Bearer "+tok)
+				r.Header.Del("X-Api-Key")
+				if !strings.Contains(r.Header.Get("anthropic-beta"), "oauth") {
+					r.Header.Add("anthropic-beta", "oauth-2025-04-20")
+				}
+			} else {
+				// No valid OAuth token available in rotation.
+				// If the request carries an API key, or environment provides one, use API key auth.
+				apiKey := r.Header.Get("X-Api-Key")
+				if apiKey == "" {
+					if envKey := os.Getenv("ANTHROPIC_API_KEY"); envKey != "" {
+						apiKey = envKey
+						r.Header.Set("X-Api-Key", apiKey)
+					}
+				}
+				if r.Header.Get("X-Api-Key") != "" {
+					r.Header.Del("Authorization")
+				}
 			}
 			if os.Getenv("AM_PROXY_DEBUG") != "" {
 				log.Printf("%s %s -> %s", r.Method, r.URL.Path, rot.active())
@@ -344,14 +360,34 @@ func (r *rotator) setActive(name string) {
 // fallback for an account that isn't the one currently installed.
 func (r *rotator) token() string {
 	r.mu.Lock()
+	if len(r.order) == 0 || r.idx >= len(r.order) {
+		r.mu.Unlock()
+		return ""
+	}
 	name := r.order[r.idx]
+	if r.dead[name] {
+		r.mu.Unlock()
+		return ""
+	}
 	acct := r.metaAccount(name)
 	fallback := r.tokens[name]
 	r.mu.Unlock()
 
 	if live := liveKeychainToken(); live != nil {
 		if acct == "" || live.account == "" || strings.EqualFold(live.account, acct) {
-			return live.Access
+			if !tokenExpiryNeedsRefresh(live.ExpiresAt.UnixMilli()) {
+				return live.Access
+			}
+			// Active profile is expired; attempt to refresh live keychain token.
+			if newAccess, err := refreshLiveClaudeToken(); err == nil {
+				cmdSave(r.tool, name)
+				return newAccess
+			}
+			r.mu.Lock()
+			r.dead[name] = true
+			r.mu.Unlock()
+			log.Printf("am: active profile %s is expired and refresh failed; blacklisting", name)
+			return ""
 		}
 		// Keychain holds a different account than the profile we think is
 		// active — install the active profile so they line up. This also
@@ -359,15 +395,26 @@ func (r *rotator) token() string {
 		// re-read the keychain afterward rather than trusting the (possibly
 		// stale) bundle token we cached at load().
 		if fallback != nil && fallback.Access != "" {
-			installActiveProfile(name)
-			if refreshed := liveKeychainToken(); refreshed != nil {
+			if !installActiveProfile(name) {
+				r.mu.Lock()
+				r.dead[name] = true
+				r.mu.Unlock()
+				return ""
+			}
+			if refreshed := liveKeychainToken(); refreshed != nil && !tokenExpiryNeedsRefresh(refreshed.ExpiresAt.UnixMilli()) {
 				return refreshed.Access
 			}
-			return fallback.Access
+			if fallback != nil && !tokenExpiryNeedsRefresh(fallback.ExpiresAt.UnixMilli()) {
+				return fallback.Access
+			}
+			return ""
 		}
-		return live.Access
+		if !tokenExpiryNeedsRefresh(live.ExpiresAt.UnixMilli()) {
+			return live.Access
+		}
+		return ""
 	}
-	if fallback != nil {
+	if fallback != nil && !tokenExpiryNeedsRefresh(fallback.ExpiresAt.UnixMilli()) {
 		return fallback.Access
 	}
 	return ""
@@ -395,9 +442,22 @@ func (r *rotator) metaAccount(name string) string {
 // the one that actually blocks the very next request.
 func (r *rotator) observe(resp *http.Response) {
 	r.mu.Lock()
+	if len(r.order) == 0 || r.idx >= len(r.order) {
+		r.mu.Unlock()
+		return
+	}
 	name := r.order[r.idx]
 	t := r.tokens[name]
 	r.mu.Unlock()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		r.mu.Lock()
+		r.dead[name] = true
+		r.mu.Unlock()
+		log.Printf("am: upstream returned 401 for %s, marking dead", name)
+		r.rotate(name, "401 unauthorized")
+		return
+	}
 	if t == nil {
 		return
 	}
@@ -482,6 +542,10 @@ func (r *rotator) periodicSnapshot() {
 
 func (r *rotator) snapshotActiveIfChanged() {
 	r.mu.Lock()
+	if len(r.order) == 0 || r.idx >= len(r.order) {
+		r.mu.Unlock()
+		return
+	}
 	name := r.order[r.idx]
 	r.mu.Unlock()
 	live := liveKeychainToken()

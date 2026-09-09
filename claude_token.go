@@ -61,9 +61,13 @@ func loadClaudeToken(tool, name string) *token {
 
 // liveKeychainToken reads the OAuth token currently installed on the system.
 func liveKeychainToken() *token {
-	s, err := kcGet(claudeKeychainService, "")
+	acct := currentUser()
+	s, err := kcGet(claudeKeychainService, acct)
 	if err != nil {
-		return nil
+		s, err = kcGet(claudeKeychainService, "")
+		if err != nil {
+			return nil
+		}
 	}
 	return parseClaudeCreds([]byte(s))
 }
@@ -209,28 +213,63 @@ func installActiveProfile(name string) bool {
 		if json.Unmarshal(e.Data, &c) != nil {
 			break
 		}
-		if !tokenExpiryNeedsRefresh(c.ClaudeAiOauth.ExpiresAt) || c.ClaudeAiOauth.RefreshToken == "" {
-			break
-		}
-		rr, err := refreshClaudeToken(c.ClaudeAiOauth.RefreshToken)
-		if err != nil {
-			log.Printf("am: refresh token for claude/%s failed, using saved (possibly expired) token: %v", name, err)
-			ok = false
-			break
-		}
-		newData, _, err := refreshedCredsJSON(e.Data, rr, c.ClaudeAiOauth.RefreshToken)
-		if err != nil {
-			log.Printf("am: rebuild refreshed creds for claude/%s failed: %v", name, err)
-			break
-		}
-		entries[i].Data = newData
-		if err := updateProfileEntry("claude", name, entries[i]); err != nil {
-			log.Printf("am: could not persist refreshed token into bundle claude/%s: %v", name, err)
+		if tokenExpiryNeedsRefresh(c.ClaudeAiOauth.ExpiresAt) {
+			if c.ClaudeAiOauth.RefreshToken == "" {
+				log.Printf("am: token for claude/%s is expired and has no refresh token", name)
+				ok = false
+				break
+			}
+			rr, err := refreshClaudeToken(c.ClaudeAiOauth.RefreshToken)
+			if err != nil {
+				log.Printf("am: refresh token for claude/%s failed: %v", name, err)
+				ok = false
+				break
+			}
+			newData, _, err := refreshedCredsJSON(e.Data, rr, c.ClaudeAiOauth.RefreshToken)
+			if err != nil {
+				log.Printf("am: rebuild refreshed creds for claude/%s failed: %v", name, err)
+				ok = false
+				break
+			}
+			entries[i].Data = newData
+			if err := updateProfileEntry("claude", name, entries[i]); err != nil {
+				log.Printf("am: could not persist refreshed token into bundle claude/%s: %v", name, err)
+			}
 		}
 		break
+	}
+	if !ok {
+		return false
 	}
 	for _, e := range entries {
 		_ = applyEntry(e)
 	}
-	return ok
+	return true
+}
+
+// refreshLiveClaudeToken attempts to refresh the token currently installed in the Keychain.
+func refreshLiveClaudeToken() (string, error) {
+	live := liveKeychainToken()
+	if live == nil {
+		return "", fmt.Errorf("no live keychain token")
+	}
+	if live.Refresh == "" {
+		return "", fmt.Errorf("no refresh token in live keychain")
+	}
+	rr, err := refreshClaudeToken(live.Refresh)
+	if err != nil {
+		return "", err
+	}
+	raw, err := kcGet(claudeKeychainService, kcAccount(claudeKeychainService))
+	if err != nil {
+		return "", err
+	}
+	newData, _, err := refreshedCredsJSON([]byte(raw), rr, live.Refresh)
+	if err != nil {
+		return "", err
+	}
+	if err := kcSet(claudeKeychainService, kcAccount(claudeKeychainService), string(newData)); err != nil {
+		return "", err
+	}
+	return rr.AccessToken, nil
 }
