@@ -5,15 +5,19 @@
   Snapshot, auto-rotate, and bridge accounts across Claude Code, OpenAI Gateway, and Multi-Provider LLMs.
 </p>
 
-<p align="center">
-  <a href="#tiếng-việt"><b>Tiếng Việt</b></a> &bull;
-  <a href="#english"><b>English</b></a>
-</p>
+---
+
+## 🌐 Chọn ngôn ngữ hiển thị / Select Documentation Language
+
+> 💡 **Hướng dẫn:** Nhấp vào thanh menu ngôn ngữ bên dưới để hiển thị phiên bản tài liệu tương ứng ngay trên trang này. **Mặc định: Tiếng Việt**.  
+> *(Click the language bar below to toggle and render the respective documentation inline — **Default: Vietnamese**)*
 
 ---
 
-<a name="tiếng-việt"></a>
-# 🇻🇳 Tiếng Việt
+<details open>
+<summary><h2>🇻🇳 BẢN TIẾNG VIỆT (Mặc định — Nhấp để đóng/mở)</h2></summary>
+
+<br>
 
 **ai-cli-accounts** (lệnh CLI: `am`) là công cụ quản lý tài khoản CLI và Local AI Proxy Gateway viết bằng Golang. 
 
@@ -23,7 +27,7 @@ Hệ thống cho phép bạn snapshot và chuyển đổi trạng thái đăng n
 
 ---
 
-## Tính Năng Nổi Bật
+### Tính Năng Nổi Bật
 
 1. **Auto-Rotate Claude Accounts:** Tự động xoay vòng qua nhiều tài khoản Claude Pro / Max trước khi chạm rate limit (dựa trên header `anthropic-ratelimit-*`), tự động gia hạn OAuth token khi sắp hết hạn.
 2. **Local AI Gateway (`/v1/chat/completions`):** Cung cấp endpoint chuẩn OpenAI (`http://127.0.0.1:8787/v1`) cho bất kỳ ứng dụng nào (Python, Node.js, Cursor, Continue, LangChain...).
@@ -34,15 +38,15 @@ Hệ thống cho phép bạn snapshot và chuyển đổi trạng thái đăng n
 
 ---
 
-## Cài Đặt & Khởi Tạo Nhanh
+### Cài Đặt & Khởi Tạo Nhanh
 
-### 1. Cài đặt tự động qua script:
+#### 1. Cài đặt tự động qua script:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ninhlee99/ai-cli-accounts/main/install.sh | sh
 ```
 Script sẽ tự động clone, biên dịch bằng Go 1.22+, cài đặt binary vào `/usr/local/bin/am`, thiết lập hook Claude Code (`am setup`) và dọn dẹp thư mục tạm.
 
-### 2. Bắt đầu sử dụng:
+#### 2. Bắt đầu sử dụng:
 ```sh
 claude          # tài khoản đầu tiên sẽ được tự động snapshot vào am
 ```
@@ -60,7 +64,7 @@ claude          # tài khoản đầu tiên sẽ được tự động snapshot 
 
 ---
 
-## Danh Sách Lệnh CLI (`am`)
+### Danh Sách Lệnh CLI (`am`)
 
 | Nhóm Lệnh | Cú Pháp | Chức Năng |
 | :--- | :--- | :--- |
@@ -90,11 +94,11 @@ claude          # tài khoản đầu tiên sẽ được tự động snapshot 
 
 ---
 
-## Sử Dụng Làm Local AI Gateway (`http://127.0.0.1:8787`)
+### Sử Dụng Làm Local AI Gateway (`http://127.0.0.1:8787`)
 
 Cổng proxy `127.0.0.1:8787` hoạt động như một OpenAI-compatible API Gateway. Mọi ứng dụng có thể trỏ về địa chỉ này để tận dụng cơ chế Auto-Failover:
 
-### 1. Python (`openai` SDK chính thức)
+#### 1. Python (`openai` SDK chính thức)
 ```python
 from openai import OpenAI
 
@@ -114,7 +118,7 @@ for chunk in stream:
         print(chunk.choices[0].delta.content, end="", flush=True)
 ```
 
-### 2. Node.js / TypeScript
+#### 2. Node.js / TypeScript
 ```typescript
 import OpenAI from "openai";
 
@@ -130,7 +134,7 @@ const completion = await openai.chat.completions.create({
 console.log(completion.choices[0].message.content);
 ```
 
-### 3. Cursor / Continue / Cline / LangChain
+#### 3. Cursor / Continue / Cline / LangChain
 Chỉ cần cấu hình trong file settings hoặc biến môi trường:
 ```bash
 OPENAI_BASE_URL="http://127.0.0.1:8787/v1"
@@ -139,7 +143,7 @@ OPENAI_API_KEY="am-proxy"
 
 ---
 
-## Cấu Hình Multi-Provider Pool
+### Cấu Hình Multi-Provider Pool
 
 Các nhà cung cấp được cấu hình trong `~/.am/accounts.json` (xem mẫu tại [`accounts.example.json`](accounts.example.json)). Bạn có thể sử dụng cú pháp `env:TEN_BIEN` để nạp khoá bí mật từ biến môi trường:
 
@@ -181,10 +185,19 @@ Các nhà cung cấp được cấu hình trong `~/.am/accounts.json` (xem mẫu
 ```
 
 ---
+
+### Bản Quyền & Đóng Góp
+
+Phát hành theo giấy phép MIT. Mọi đóng góp ý kiến hoặc báo lỗi vui lòng gửi qua lệnh `am feedback` hoặc GitHub Pull Requests!
+
+</details>
+
 ---
 
-<a name="english"></a>
-# 🇬🇧 English
+<details>
+<summary><h2>🇬🇧 ENGLISH EDITION (Click to expand / collapse)</h2></summary>
+
+<br>
 
 **ai-cli-accounts** (CLI command: `am`) is a production-ready AI CLI Account Manager and Local AI Proxy Gateway written in Golang.
 
@@ -194,7 +207,7 @@ It lets you snapshot and seamlessly swap local login states of **Claude Code**, 
 
 ---
 
-## Key Features
+### Key Features
 
 1. **Auto-Rotate Claude Accounts:** Seamlessly rotates through multiple Claude Pro / Max accounts before hitting rate limits (tracked via upstream `anthropic-ratelimit-*` headers) and refreshes OAuth tokens automatically.
 2. **Local AI Gateway (`/v1/chat/completions`):** Provides an OpenAI-compatible endpoint (`http://127.0.0.1:8787/v1`) for external developer tools (Python, Node.js, Cursor, Continue, LangChain...).
@@ -205,15 +218,15 @@ It lets you snapshot and seamlessly swap local login states of **Claude Code**, 
 
 ---
 
-## Installation & Quick Start
+### Installation & Quick Start
 
-### 1. One-line installer:
+#### 1. One-line installer:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ninhlee99/ai-cli-accounts/main/install.sh | sh
 ```
 This script clones into a temporary directory, builds with Go 1.22+, installs the binary to `/usr/local/bin/am`, configures the Claude Code hook (`am setup`), and cleans up.
 
-### 2. Usage:
+#### 2. Usage:
 ```sh
 claude          # Your first account is automatically snapshotted into am
 ```
@@ -231,7 +244,7 @@ To add a 2nd account: run `/login` inside Claude Code, then open a new terminal 
 
 ---
 
-## CLI Command Reference (`am`)
+### CLI Command Reference (`am`)
 
 | Category | Command | Description |
 | :--- | :--- | :--- |
@@ -261,11 +274,11 @@ To add a 2nd account: run `/login` inside Claude Code, then open a new terminal 
 
 ---
 
-## Using as Local AI Gateway (`http://127.0.0.1:8787`)
+### Using as Local AI Gateway (`http://127.0.0.1:8787`)
 
 The local proxy at `127.0.0.1:8787` acts as a unified OpenAI-compatible Gateway. Point any client or tool to this endpoint to take advantage of auto-rotation and failover:
 
-### 1. Python (Official `openai` SDK)
+#### 1. Python (Official `openai` SDK)
 ```python
 from openai import OpenAI
 
@@ -285,7 +298,7 @@ for chunk in stream:
         print(chunk.choices[0].delta.content, end="", flush=True)
 ```
 
-### 2. Node.js / TypeScript
+#### 2. Node.js / TypeScript
 ```typescript
 import OpenAI from "openai";
 
@@ -301,7 +314,7 @@ const completion = await openai.chat.completions.create({
 console.log(completion.choices[0].message.content);
 ```
 
-### 3. Cursor / Continue / Cline / LangChain
+#### 3. Cursor / Continue / Cline / LangChain
 Configure in environment variables or IDE settings:
 ```bash
 OPENAI_BASE_URL="http://127.0.0.1:8787/v1"
@@ -310,7 +323,7 @@ OPENAI_API_KEY="am-proxy"
 
 ---
 
-## Multi-Provider Pool Configuration
+### Multi-Provider Pool Configuration
 
 Providers are configured in `~/.am/accounts.json` (see example at [`accounts.example.json`](accounts.example.json)). You can use `env:VARIABLE_NAME` to resolve secrets securely from environment variables:
 
@@ -353,6 +366,8 @@ Providers are configured in `~/.am/accounts.json` (see example at [`accounts.exa
 
 ---
 
-## License & Contributing
+### License & Contributing
 
 Licensed under the MIT License. Contributions and feedback are welcome via `am feedback` or GitHub Pull Requests!
+
+</details>
