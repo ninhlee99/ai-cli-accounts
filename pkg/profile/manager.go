@@ -497,9 +497,26 @@ func CmdUse(tool, name string) error {
 			}
 		}
 	}
-	for _, e := range LoadProfileEntries(tool, name) {
-		if err := ApplyEntry(e); err != nil {
-			return fmt.Errorf("restore %s: %w", e.Artifact.Path+e.Artifact.Service, err)
+	if tool == "claude" {
+		// Route through InstallActiveProfile rather than applying entries
+		// raw: it refreshes the bundled access token first when it's
+		// expired/near-expiry (using the refresh token captured at
+		// save/export time), persists the refreshed creds back into the
+		// bundle, and only then installs into the keychain. Without this, a
+		// profile imported via `am import --activate claude=<name>` (or any
+		// `am use claude <name>`/`am sw` on a token that's been sitting
+		// unused) would install a stale access token verbatim and fail on
+		// first use even though a perfectly good refresh token was right
+		// there — mirrors what Rotator.ForceSwitch already does for the
+		// proxy's own `/_am/switch` path.
+		if !InstallActiveProfile(name) {
+			return fmt.Errorf("refresh token for %q is dead — log into it again before switching to it", name)
+		}
+	} else {
+		for _, e := range LoadProfileEntries(tool, name) {
+			if err := ApplyEntry(e); err != nil {
+				return fmt.Errorf("restore %s: %w", e.Artifact.Path+e.Artifact.Service, err)
+			}
 		}
 	}
 	WriteActivePointer(tool, name)
