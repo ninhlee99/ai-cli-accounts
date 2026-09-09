@@ -28,7 +28,9 @@ func proxyBase() string { return "http://" + proxyAddr() }
 // on demand; `am proxy down` (SessionEnd) just deregisters the session for
 // `am status`'s count — it no longer stops the server, so
 // ANTHROPIC_BASE_URL=127.0.0.1:8787 is never left pointing at a dead
-// listener mid-session. Use `am proxy down --force` to actually stop it.
+// listener mid-session. `am proxy down --force` actually stops it, but
+// refuses while any claude tab is still attached (add --yes-i-know to
+// override) — see proxyForceStop.
 func cmdProxy(args []string) {
 	if len(args) > 0 {
 		switch args[0] {
@@ -37,7 +39,7 @@ func cmdProxy(args []string) {
 			return
 		case "down":
 			if len(args) > 1 && args[1] == "--force" {
-				proxyForceStop()
+				proxyForceStop(len(args) > 2 && args[2] == "--yes-i-know")
 			} else {
 				proxyReleaseAndMaybeStop()
 			}
@@ -723,10 +725,24 @@ func proxyReleaseAndMaybeStop() {
 
 // proxyForceStop actually shuts the background proxy down. `am status`
 // afterwards will show the base URL falling back to the real Anthropic API.
-func proxyForceStop() {
+//
+// Any claude tab already running has ANTHROPIC_BASE_URL=127.0.0.1:8787 baked
+// into its process environment — read once at its own startup, not am's to
+// change. Stopping the proxy out from under one leaves it pointed at a dead
+// port for the rest of its life (connection refused, no auto-fallback). So
+// this refuses when sessions are attached unless overridden with
+// --yes-i-know, same idea as `rm -rf` wanting `-f` to skip the safety check.
+func proxyForceStop(skipCheck bool) {
 	if !proxyUp() {
 		fmt.Println("proxy not running")
 		return
+	}
+	if !skipCheck {
+		if n := attachedSessions(); n > 0 {
+			die("%d claude tab(s) still attached — stopping now leaves them pointed at a dead port "+
+				"(ANTHROPIC_BASE_URL is fixed for the life of that process). "+
+				"Close those tabs first, or `am proxy down --force --yes-i-know` to stop anyway.", n)
+		}
 	}
 	resp, err := http.Post(proxyBase()+"/_am/shutdown", "", nil)
 	if err != nil {
@@ -737,6 +753,19 @@ func proxyForceStop() {
 		die("shutdown request returned %s (binary running may be stale — rebuild/reinstall am)", resp.Status)
 	}
 	fmt.Println("proxy stopped")
+}
+
+func attachedSessions() int {
+	resp, err := http.Get(proxyBase() + "/_am/status")
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	var s struct {
+		Sessions int `json:"sessions"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&s)
+	return s.Sessions
 }
 
 func spawnProxy() {
