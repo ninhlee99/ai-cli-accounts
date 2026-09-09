@@ -46,7 +46,8 @@ it's picked up into rotation on its own, no extra command needed.
 | `am rename <id\|name> <new>` | give a profile a custom name |
 | `am rm <id\|name>` | move a profile to trash (asks first) |
 | `am restore <id\|name>` / `--backup` | bring back a trashed profile / re-import the latest auto-backup |
-| `am status` | proxy state, sessions attached, effective base URL, per-account state |
+| `am status` | proxy state, sessions attached, effective base URL, per-account state (5h/7d limit usage) |
+| `am usage [day\|week\|month\|all]` | tokens used through the proxy, by account and by model (default: week) |
 | `am hook install\|uninstall\|status` | wire/remove the Claude Code proxy hook |
 | `am proxy` | run the proxy in the foreground (normally automatic; stays up until `am proxy down --force`, which refuses while any claude tab is attached unless you add `--yes-i-know`) |
 | `am env` | print `export` lines for the shell rc (`eval "$(am env)"`) — always resolves `ANTHROPIC_BASE_URL` to the proxy |
