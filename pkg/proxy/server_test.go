@@ -48,7 +48,10 @@ func newTestHandler(t *testing.T) http.Handler {
 	rp := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unexpected reverse-proxy call in test", http.StatusTeapot)
 	})
-	return newHandler(rot, life, mode, pool, rp, "https://api.anthropic.com", func() {})
+	sw := &swappableHandler{}
+	h := newHandler(rot, life, mode, pool, rp, "https://api.anthropic.com", sw, func() {})
+	sw.Set(h)
+	return sw
 }
 
 func TestHandler_SessionRejectsMissingPID(t *testing.T) {

@@ -204,7 +204,7 @@ func (a *CodexCLIAdapter) SendMessageStream(ctx context.Context, req *types.Chat
 		if werr := writeCodexAuthTokens(path, doc, newAccess, newRefresh); werr != nil {
 			// Non-fatal: we can still serve this request with the freshly
 			// minted token even if persisting it back to disk failed.
-			log.Printf("am: could not persist refreshed codex token to %s: %v", path, werr)
+			log.Printf("amux: could not persist refreshed codex token to %s: %v", path, werr)
 		}
 	}
 

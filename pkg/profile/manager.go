@@ -393,25 +393,25 @@ func InstallActiveProfile(name string) bool {
 		}
 		if auth.TokenExpiryNeedsRefresh(c.ClaudeAiOauth.ExpiresAt) {
 			if c.ClaudeAiOauth.RefreshToken == "" {
-				log.Printf("am: token for claude/%s is expired and has no refresh token", name)
+				log.Printf("amux: token for claude/%s is expired and has no refresh token", name)
 				ok = false
 				break
 			}
 			rr, err := auth.RefreshClaudeToken(c.ClaudeAiOauth.RefreshToken)
 			if err != nil {
-				log.Printf("am: refresh token for claude/%s failed: %v", name, err)
+				log.Printf("amux: refresh token for claude/%s failed: %v", name, err)
 				ok = false
 				break
 			}
 			newData, _, err := auth.RefreshedCredsJSON(e.Data, rr, c.ClaudeAiOauth.RefreshToken)
 			if err != nil {
-				log.Printf("am: rebuild refreshed creds for claude/%s failed: %v", name, err)
+				log.Printf("amux: rebuild refreshed creds for claude/%s failed: %v", name, err)
 				ok = false
 				break
 			}
 			entries[i].Data = newData
 			if err := UpdateProfileEntry("claude", name, entries[i]); err != nil {
-				log.Printf("am: could not persist refreshed token into bundle claude/%s: %v", name, err)
+				log.Printf("amux: could not persist refreshed token into bundle claude/%s: %v", name, err)
 			}
 		}
 		break
@@ -566,7 +566,7 @@ func SyncActiveFromSystem(tool string) {
 	name := ProfileNameForAccount(tool, acct)
 	if name == "" {
 		name = SanitizeName(acct)
-		fmt.Printf("am: current %s login %q not saved yet — snapshotting it\n", tool, acct)
+		fmt.Printf("amux: current %s login %q not saved yet — snapshotting it\n", tool, acct)
 		_, _ = CmdSave(tool, name)
 		return
 	}

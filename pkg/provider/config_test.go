@@ -257,6 +257,31 @@ func TestProvider_SetPriority(t *testing.T) {
 	}
 }
 
+func TestProvider_SetModel(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "am-provider-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+	cfgPath := filepath.Join(tmpDir, "accounts.json")
+
+	if err := AddOrUpdateProvider(cfgPath, ProviderConfig{ID: "gemini:01", Type: "gemini", Priority: 2, Model: "gemini-2.0-flash"}); err != nil {
+		t.Fatalf("AddOrUpdateProvider failed: %v", err)
+	}
+
+	if err := SetModel(cfgPath, "gemini:01", "gemini-1.5-pro"); err != nil {
+		t.Fatalf("SetModel (existing) failed: %v", err)
+	}
+	f, _ := LoadConfigFile(cfgPath)
+	if len(f.Providers) != 1 || f.Providers[0].Model != "gemini-1.5-pro" {
+		t.Fatalf("expected model gemini-1.5-pro, got %+v", f.Providers)
+	}
+
+	if err := SetModel(cfgPath, "does-not-exist", "some-model"); err == nil {
+		t.Errorf("expected error for unknown id")
+	}
+}
+
 func TestProvider_IsConfigured(t *testing.T) {
 	// Unconfigured openai_compatible (missing or unset env)
 	p1 := ProviderConfig{Type: "openai_compatible", APIKey: "env:UNSET_KEY_9999"}

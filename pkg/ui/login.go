@@ -18,19 +18,27 @@ import (
 // CmdLogin handles the interactive login flow for supported providers.
 func CmdLogin(args []string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: am login <provider>")
+		fmt.Println("Usage: amux login <provider> [--model M]")
 		fmt.Println("Providers: chatgpt, claude, gemini, github, groq")
 		return
 	}
 
 	target := strings.ToLower(args[0])
+	model := ""
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--model" && i+1 < len(args) {
+			model = args[i+1]
+			i++
+		}
+	}
+
 	switch target {
 	case "chatgpt":
-		loginChatGPT()
+		loginChatGPT(model)
 	case "claude":
-		loginClaude()
+		loginClaude(model)
 	case "gemini":
-		loginGemini()
+		loginGemini(model)
 	case "github", "github-models":
 		loginGitHubModels()
 	case "groq":
@@ -71,7 +79,7 @@ func nextPoolID(prefix string) (id string, priorityFloor int, hasExisting bool) 
 	return types.FormatID(prefix, n+1), maxPriority + 1, hasExisting
 }
 
-func loginChatGPT() {
+func loginChatGPT(model string) {
 	fmt.Println("== Login: ChatGPT Web ==")
 	tok, bName, err := browser.ExtractCookie("chatgpt.com", "__Secure-next-auth.session-token")
 	if err != nil || tok == "" {
@@ -98,12 +106,15 @@ func loginChatGPT() {
 		priority = priorityFloor
 	}
 
+	if model == "" {
+		model = "auto"
+	}
 	err = provider.AddOrUpdateProvider(provider.DefaultAccountsPath(), provider.ProviderConfig{
 		ID:           id,
 		Type:         "chatgpt_web",
 		Priority:     priority,
 		SessionToken: tok,
-		Model:        "auto",
+		Model:        model,
 	})
 	if err != nil {
 		fmt.Printf("Error saving configuration: %v\n", err)
@@ -113,7 +124,7 @@ func loginChatGPT() {
 	fmt.Printf("Successfully saved ChatGPT Web account to pool as %s!\n", id)
 }
 
-func loginClaude() {
+func loginClaude(model string) {
 	fmt.Println("== Login: Claude Web ==")
 	key, bName, err := browser.ExtractCookie("claude.ai", "sessionKey")
 	if err == nil && key != "" {
@@ -133,12 +144,15 @@ func loginClaude() {
 		priority = priorityFloor
 	}
 
+	if model == "" {
+		model = "claude-3-5-sonnet-20241022"
+	}
 	err = provider.AddOrUpdateProvider(provider.DefaultAccountsPath(), provider.ProviderConfig{
 		ID:         id,
 		Type:       "claude_web",
 		Priority:   priority,
 		SessionKey: key,
-		Model:      "claude-3-5-sonnet-20241022",
+		Model:      model,
 	})
 	if err != nil {
 		fmt.Printf("Error saving configuration: %v\n", err)
@@ -148,7 +162,7 @@ func loginClaude() {
 	fmt.Printf("Successfully saved Claude Web account to pool as %s!\n", id)
 }
 
-func loginGemini() {
+func loginGemini(model string) {
 	fmt.Println("== Login: Google AI Studio (Gemini) ==")
 	key := readLinePrompt("Enter Google AI Studio API Key (or press Enter to read from $GOOGLE_AI_STUDIO_KEY): ")
 	if key == "" {
@@ -161,12 +175,15 @@ func loginGemini() {
 		priority = priorityFloor
 	}
 
+	if model == "" {
+		model = "gemini-2.0-flash"
+	}
 	err := provider.AddOrUpdateProvider(provider.DefaultAccountsPath(), provider.ProviderConfig{
 		ID:       id,
 		Type:     "gemini",
 		Priority: priority,
 		APIKey:   key,
-		Model:    "gemini-2.0-flash",
+		Model:    model,
 	})
 	if err != nil {
 		fmt.Printf("Error saving configuration: %v\n", err)
@@ -260,8 +277,24 @@ func CmdAccounts() {
 		}
 	}
 
+	// Same idea for the auto-surfaced DuckDuckGo fallback (see
+	// provider.DuckDuckGoAutoRow) — it has no real accounts.json entry
+	// either, unless the user has explicitly configured or disabled it.
+	hasDuckDuckGoRow := false
+	for _, p := range rows {
+		if p.Type == "duckduckgo" {
+			hasDuckDuckGoRow = true
+			break
+		}
+	}
+	if !hasDuckDuckGoRow {
+		if row, ok := provider.DuckDuckGoAutoRow(rows); ok {
+			rows = append(rows, row)
+		}
+	}
+
 	if len(rows) == 0 {
-		fmt.Println("No accounts configured in pool yet. Run 'am login <provider>' or create ~/.am/accounts.json.")
+		fmt.Println("No accounts configured in pool yet. Run 'amux login <provider>' or create ~/.am/accounts.json.")
 		return
 	}
 
@@ -316,7 +349,7 @@ func CmdAccountsCmd(args []string) {
 	switch args[0] {
 	case "priority":
 		if len(args) < 3 {
-			fmt.Println("Usage: am accounts priority <id> <N>")
+			fmt.Println("Usage: amux accounts priority <id> <N>")
 			return
 		}
 		n, err := strconv.Atoi(args[2])
@@ -330,15 +363,26 @@ func CmdAccountsCmd(args []string) {
 		}
 		proxy.Sync()
 		fmt.Printf("set %s priority to %d\n", args[1], n)
+	case "model":
+		if len(args) < 3 {
+			fmt.Println("Usage: amux accounts model <id> <model>")
+			return
+		}
+		if err := provider.SetModel(provider.DefaultAccountsPath(), args[1], args[2]); err != nil {
+			fmt.Printf("Error setting model: %v\n", err)
+			return
+		}
+		proxy.Sync()
+		fmt.Printf("set %s model to %s\n", args[1], args[2])
 	default:
-		fmt.Println("Usage: am accounts [priority <id> <N>]")
+		fmt.Println("Usage: amux accounts [priority <id> <N> | model <id> <model>]")
 	}
 }
 
 // CmdAPI handles 'am api add', 'am api rm', 'am api ls'.
 func CmdAPI(args []string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: am api [add | rm | ls]")
+		fmt.Println("Usage: amux api [add | rm | ls]")
 		return
 	}
 
@@ -347,7 +391,7 @@ func CmdAPI(args []string) {
 		CmdAccounts()
 	case "rm", "delete":
 		if len(args) < 2 {
-			fmt.Println("Usage: am api rm <name>")
+			fmt.Println("Usage: amux api rm <name>")
 			return
 		}
 		if err := provider.RemoveProvider(provider.DefaultAccountsPath(), args[1]); err != nil {
@@ -396,7 +440,7 @@ func CmdAPI(args []string) {
 		}
 
 		if name == "" || endpoint == "" {
-			fmt.Println("Usage: am api add <name> --endpoint <url> --api-key <key> [--model M] [--priority N]")
+			fmt.Println("Usage: amux api add <name> --endpoint <url> --api-key <key> [--model M] [--priority N]")
 			return
 		}
 

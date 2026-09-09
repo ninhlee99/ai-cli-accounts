@@ -102,7 +102,7 @@ func (r *Rotator) RefreshFromDisk() {
 			if fresh != nil && (old == nil || old.Access != fresh.Access || old.Refresh != fresh.Refresh) {
 				r.tokens[p.Name] = fresh
 				delete(r.dead, p.Name)
-				log.Printf("am: %s re-logged in — cleared dead-refresh flag", p.Name)
+				log.Printf("amux: %s re-logged in — cleared dead-refresh flag", p.Name)
 			}
 		}
 	}
@@ -182,7 +182,7 @@ func (r *Rotator) Token() string {
 		r.mu.Lock()
 		r.dead[name] = true
 		r.mu.Unlock()
-		log.Printf("am: active profile %s is expired and refresh failed; blacklisting", name)
+		log.Printf("amux: active profile %s is expired and refresh failed; blacklisting", name)
 		return ""
 	}
 
@@ -230,7 +230,7 @@ func (r *Rotator) Observe(resp *http.Response) {
 		r.mu.Lock()
 		r.dead[name] = true
 		r.mu.Unlock()
-		log.Printf("am: upstream returned 401 for %s, marking dead", name)
+		log.Printf("amux: upstream returned 401 for %s, marking dead", name)
 		r.Rotate(name, "401 unauthorized")
 		return
 	}
@@ -342,7 +342,7 @@ func (r *Rotator) snapshotActiveIfChanged() {
 	r.mu.Lock()
 	r.tokens[name] = live
 	r.mu.Unlock()
-	log.Printf("am: re-synced %s bundle (token rotated while active)", name)
+	log.Printf("amux: re-synced %s bundle (token rotated while active)", name)
 }
 
 func (r *Rotator) Rotate(from, reason string) {

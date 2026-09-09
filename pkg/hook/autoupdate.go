@@ -13,8 +13,21 @@ import (
 
 const AutoUpdatePlistLabel = "com.ninhlee.amux.autoupdate"
 
+// launchAgentPathOverride lets tests point IsAutoUpdateEnabled's
+// plist-existence fallback (below) at a path scoped to a temp dir instead
+// of the real macOS LaunchAgents directory. Left empty in production —
+// launchd only ever looks in the real path, so this must never move for a
+// real install. Without it, a machine that has auto-update genuinely
+// enabled for real leaks that state into a test running against a fresh
+// AM_DIR, since the fallback deliberately checks outside AM_DIR (see
+// LaunchAgentPath doc).
+var launchAgentPathOverride string
+
 // LaunchAgentPath returns the macOS LaunchAgent plist path for amux auto-update.
 func LaunchAgentPath() string {
+	if launchAgentPathOverride != "" {
+		return launchAgentPathOverride
+	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "Library", "LaunchAgents", AutoUpdatePlistLabel+".plist")
 }

@@ -13,16 +13,31 @@ import (
 )
 
 // CmdChat runs a standalone terminal chat session backed by the pool router.
+// A leading "--provider <id>" (or "-p <id>") pins the session to that one
+// pool adapter instead of the whole pool with failover.
 func CmdChat(args []string) {
-	adapters, err := provider.LoadAccounts(provider.DefaultAccountsPath())
-	if err != nil || len(adapters) == 0 {
-		adapters = []types.ProviderAdapter{
-			&provider.DuckDuckGoAdapter{
-				AdapterID:   "duckduckgo",
-				TargetModel: "claude-3-haiku-20240307",
-				PriorityLvl: 99,
-			},
+	providerID, args := extractProviderFlag(args)
+
+	// LoadAccounts always includes at least the auto-surfaced, no-auth
+	// DuckDuckGo fallback (see duckduckgoFallbackAdapter) unless the user
+	// explicitly opted out, so no separate empty-pool fallback is needed
+	// here.
+	adapters, _ := provider.LoadAccounts(provider.DefaultAccountsPath())
+
+	if providerID != "" {
+		var match types.ProviderAdapter
+		var ids []string
+		for _, a := range adapters {
+			ids = append(ids, a.ID())
+			if a.ID() == providerID {
+				match = a
+			}
 		}
+		if match == nil {
+			fmt.Printf("No provider %q in pool. Available: %s\n", providerID, strings.Join(ids, ", "))
+			return
+		}
+		adapters = []types.ProviderAdapter{match}
 	}
 
 	pool := router.NewAccountPoolRouter(adapters)
@@ -54,6 +69,20 @@ func CmdChat(args []string) {
 		runChatTurn(pool, &history, line)
 	}
 	fmt.Println("\nBye!")
+}
+
+// extractProviderFlag pulls a leading "--provider <id>" or "-p <id>" out of
+// args, returning the id (empty if absent) and the remaining args.
+func extractProviderFlag(args []string) (id string, rest []string) {
+	for i := 0; i < len(args); i++ {
+		if (args[i] == "--provider" || args[i] == "-p") && i+1 < len(args) {
+			id = args[i+1]
+			rest = append(rest, args[:i]...)
+			rest = append(rest, args[i+2:]...)
+			return id, rest
+		}
+	}
+	return "", args
 }
 
 func runChatTurn(pool *router.AccountPoolRouter, history *[]types.ChatMessage, prompt string) {

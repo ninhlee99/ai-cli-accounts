@@ -161,8 +161,46 @@ func SetPriority(path, id string, priority int) error {
 		return SaveConfigFile(path, f)
 	}
 
+	// Same idea for the auto-surfaced DuckDuckGo fallback (duckduckgoFallbackAdapter):
+	// it has no accounts.json row of its own either, so give it one on first use.
+	if id == "duckduckgo" {
+		f.Providers = append(f.Providers, ProviderConfig{ID: "duckduckgo", Type: "duckduckgo", Enabled: boolPtr(true), Priority: priority})
+		return SaveConfigFile(path, f)
+	}
+
 	return fmt.Errorf("no provider with id %q in pool (see: am accounts)", id)
 }
+
+// SetModel updates the target model of one provider by ID and persists it.
+// If id is "duckduckgo" and no row exists yet (the auto-surfaced fallback,
+// see duckduckgoFallbackAdapter, has none), a row is inserted instead of
+// erroring, so its model can be overridden without ever hand-editing
+// accounts.json.
+func SetModel(path, id, model string) error {
+	f, err := LoadConfigFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if f == nil {
+		f = &AccountsFile{}
+	}
+
+	for i, p := range f.Providers {
+		if p.ID == id {
+			f.Providers[i].Model = model
+			return SaveConfigFile(path, f)
+		}
+	}
+
+	if id == "duckduckgo" {
+		f.Providers = append(f.Providers, ProviderConfig{ID: "duckduckgo", Type: "duckduckgo", Enabled: boolPtr(true), Priority: duckduckgoFallbackPriority, Model: model})
+		return SaveConfigFile(path, f)
+	}
+
+	return fmt.Errorf("no provider with id %q in pool (see: am accounts)", id)
+}
+
+func boolPtr(b bool) *bool { return &b }
 
 func ResolveSecret(val string) string {
 	if strings.HasPrefix(val, "env:") {
@@ -245,7 +283,7 @@ func LoadAccounts(path string) ([]types.ProviderAdapter, error) {
 				}
 				a, err := BuildAdapter(p)
 				if err != nil {
-					log.Printf("am: skip provider %q (type=%q): %v", p.ID, p.Type, err)
+					log.Printf("amux: skip provider %q (type=%q): %v", p.ID, p.Type, err)
 					continue
 				}
 				adapters = append(adapters, a)
@@ -262,7 +300,40 @@ func LoadAccounts(path string) ([]types.ProviderAdapter, error) {
 		adapters = append(adapters, a)
 	}
 
+	// 3. Auto-surface a free, no-auth DuckDuckGo adapter as the pool's last
+	// resort, so once every real account above is in cooldown (rate limit)
+	// or failing, the router still has somewhere to fall over to instead of
+	// erroring out. See duckduckgoFallbackAdapter.
+	if a := duckduckgoFallbackAdapter(providers); a != nil {
+		adapters = append(adapters, a)
+	}
+
 	return adapters, nil
+}
+
+// duckduckgoFallbackPriority is deliberately higher (tried later, per the
+// router's ascending-priority order — pkg/router/pool.go) than every other
+// adapter's typical priority (1-10), so DuckDuckGo only gets used once
+// every real account is in cooldown or failing.
+const duckduckgoFallbackPriority = 100
+
+// duckduckgoFallbackAdapter auto-surfaces the free, no-auth DuckDuckGo
+// adapter as the pool's last resort, mirroring codexPoolAdapter: no
+// explicit accounts.json entry is required. If the user already has a
+// "duckduckgo"-typed row of their own (enabled or explicitly disabled),
+// that row is handled by the main BuildAdapter loop above (or is an
+// explicit opt-out) and this returns nil to avoid a duplicate adapter ID.
+func duckduckgoFallbackAdapter(providers []ProviderConfig) types.ProviderAdapter {
+	for _, p := range providers {
+		if p.Type == "duckduckgo" {
+			return nil
+		}
+	}
+	return &DuckDuckGoAdapter{
+		AdapterID:   "duckduckgo",
+		TargetModel: "GPT-5.6 Luma",
+		PriorityLvl: duckduckgoFallbackPriority,
+	}
 }
 
 // codexPoolAdapter builds the Codex CLI token-reuse adapter if a live
@@ -302,6 +373,19 @@ func CodexAutoRow(providers []ProviderConfig) (ProviderConfig, bool) {
 		return ProviderConfig{}, false
 	}
 	return ProviderConfig{ID: a.AdapterID, Type: "codex_cli", Priority: a.PriorityLvl}, true
+}
+
+// DuckDuckGoAutoRow returns a synthetic display row for the auto-surfaced
+// DuckDuckGo fallback adapter (see duckduckgoFallbackAdapter), for callers
+// like `am accounts` that want to show it even though it has no real entry
+// in accounts.json. ok is false when the user already has a "duckduckgo"-
+// typed row of their own (enabled or an explicit opt-out).
+func DuckDuckGoAutoRow(providers []ProviderConfig) (ProviderConfig, bool) {
+	a, ok := duckduckgoFallbackAdapter(providers).(*DuckDuckGoAdapter)
+	if !ok || a == nil {
+		return ProviderConfig{}, false
+	}
+	return ProviderConfig{ID: a.AdapterID, Type: "duckduckgo", Priority: a.PriorityLvl, Model: a.TargetModel, Enabled: boolPtr(true)}, true
 }
 
 // codexPoolID resolves the unified ID of the currently active codex

@@ -20,12 +20,12 @@ const (
 // CmdStatus displays the rich status table for proxy, Claude accounts, and provider pool.
 func CmdStatus() {
 	if !proxy.ProxyUp() {
-		fmt.Printf("proxy:       %s not running (starts automatically when you launch claude, stays up until `am proxy down --force`)\n", dotGray)
+		fmt.Printf("proxy:       %s not running (starts automatically when you launch claude, stays up until `amux proxy down --force`)\n", dotGray)
 		fmt.Printf("base URL:    https://api.anthropic.com  (direct — no rotation, no auto-switch on rate limit)\n")
 		if hook.IsAutoUpdateEnabled() {
 			fmt.Printf("auto-update: %s enabled (LaunchAgent checks every 6h)\n\n", dotGreen)
 		} else {
-			fmt.Printf("auto-update: %s disabled (run `am setup --auto-update` to enable)\n\n", dotGray)
+			fmt.Printf("auto-update: %s disabled (run `amux setup --auto-update` to enable)\n\n", dotGray)
 		}
 		profile.PrintLiveLogins()
 		return
@@ -77,7 +77,7 @@ func CmdStatus() {
 	if hook.IsAutoUpdateEnabled() {
 		fmt.Printf("auto-update: %s enabled (LaunchAgent checks every 6h)\n\n", dotGreen)
 	} else {
-		fmt.Printf("auto-update: %s disabled (run `am setup --auto-update` to enable)\n\n", dotGray)
+		fmt.Printf("auto-update: %s disabled (run `amux setup --auto-update` to enable)\n\n", dotGray)
 	}
 
 	for _, a := range s.Accounts {

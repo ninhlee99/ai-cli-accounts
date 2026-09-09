@@ -59,20 +59,20 @@ func PrintUsageReport(args []string) {
 		case "--date", "-d":
 			i++
 			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "am usage: --date/-d needs a value (YYYY-MM-DD)")
+				fmt.Fprintln(os.Stderr, "amux usage: --date/-d needs a value (YYYY-MM-DD)")
 				os.Exit(1)
 			}
 			dateArg = args[i]
 		case "--project", "-p":
 			i++
 			if i >= len(args) {
-				fmt.Fprintln(os.Stderr, "am usage: --project/-p needs a value")
+				fmt.Fprintln(os.Stderr, "amux usage: --project/-p needs a value")
 				os.Exit(1)
 			}
 			projectFilter = args[i]
 		default:
 			if periodGiven || strings.HasPrefix(a, "-") {
-				fmt.Fprintln(os.Stderr, "am usage: [day|week|month|all] [-d|--date YYYY-MM-DD] [-p|--project NAME] [-D|--detail]")
+				fmt.Fprintln(os.Stderr, "amux usage: [day|week|month|all] [-d|--date YYYY-MM-DD] [-p|--project NAME] [-D|--detail]")
 				os.Exit(1)
 			}
 			period = a
@@ -86,7 +86,7 @@ func PrintUsageReport(args []string) {
 	if dateArg != "" {
 		d, err := time.ParseInLocation("2006-01-02", dateArg, now.Location())
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "am usage: --date %q: want YYYY-MM-DD\n", dateArg)
+			fmt.Fprintf(os.Stderr, "amux usage: --date %q: want YYYY-MM-DD\n", dateArg)
 			os.Exit(1)
 		}
 		dateOnly = d
@@ -103,7 +103,7 @@ func PrintUsageReport(args []string) {
 		case "all":
 			since = time.Time{}
 		default:
-			fmt.Fprintln(os.Stderr, "am usage: [day|week|month|all] [--date YYYY-MM-DD] [--project NAME] [--detail]")
+			fmt.Fprintln(os.Stderr, "amux usage: [day|week|month|all] [--date YYYY-MM-DD] [--project NAME] [--detail]")
 			os.Exit(1)
 		}
 	}
