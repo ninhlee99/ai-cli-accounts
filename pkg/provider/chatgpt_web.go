@@ -31,9 +31,25 @@ func (a *ChatGPTWebAdapter) client() *http.Client {
 	if a.HTTPClient != nil {
 		return a.HTTPClient
 	}
-	return &http.Client{Timeout: 120 * time.Second}
+	// Shared, connection-pooled client instead of allocating a fresh
+	// http.Client (and fresh TCP/TLS connections) per request. See
+	// http_client.go.
+	return defaultHTTPClient
 }
 
+// BuildConcatenatedPrompt flattens a multi-turn ChatRequest into the single
+// text blob the web adapters (ChatGPT, Claude web) send as one message.
+// Multiple system messages are merged into one "[System Instructions]"
+// block up front (rather than repeating the header per message) so the
+// instructions read as one coherent block and nothing is dropped.
+//
+// Edge case: if messages contains only system message(s) and no user/
+// assistant turns (e.g. a client sends a bare system prompt with an empty
+// history), the output is still well-formed: "[System Instructions]\n<...>"
+// followed by a trailing "Assistant:" cue with no history in between. This
+// is intentional — it still gives the web adapter's chat UI a prompt to
+// respond to instead of an empty string. See TestBuildConcatenatedPrompt_
+// SystemOnly in config_test.go for the locked-in behavior.
 func BuildConcatenatedPrompt(messages []types.ChatMessage) string {
 	if len(messages) == 0 {
 		return ""
@@ -42,14 +58,16 @@ func BuildConcatenatedPrompt(messages []types.ChatMessage) string {
 		return messages[0].Content
 	}
 
+	var sys strings.Builder
 	var sb strings.Builder
 	for _, m := range messages {
 		role := strings.ToLower(m.Role)
 		switch role {
 		case "system":
-			sb.WriteString("[System Instructions]\n")
-			sb.WriteString(m.Content)
-			sb.WriteString("\n\n")
+			if sys.Len() > 0 {
+				sys.WriteString("\n\n")
+			}
+			sys.WriteString(m.Content)
 		case "user":
 			sb.WriteString("User: ")
 			sb.WriteString(m.Content)
@@ -66,8 +84,16 @@ func BuildConcatenatedPrompt(messages []types.ChatMessage) string {
 			sb.WriteString(fmt.Sprintf("%s: %s\n\n", title, m.Content))
 		}
 	}
-	sb.WriteString("Assistant: ")
-	return strings.TrimSpace(sb.String())
+
+	var out strings.Builder
+	if sys.Len() > 0 {
+		out.WriteString("[System Instructions]\n")
+		out.WriteString(sys.String())
+		out.WriteString("\n\n")
+	}
+	out.WriteString(sb.String())
+	out.WriteString("Assistant: ")
+	return strings.TrimSpace(out.String())
 }
 
 func (a *ChatGPTWebAdapter) SendMessageStream(ctx context.Context, req *types.ChatRequest) (<-chan types.StreamChunk, error) {

@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"ai-cli-accounts/pkg/types"
 )
@@ -33,7 +32,8 @@ func (a *DuckDuckGoAdapter) client() *http.Client {
 	if a.HTTPClient != nil {
 		return a.HTTPClient
 	}
-	return &http.Client{Timeout: 120 * time.Second}
+	// Shared, connection-pooled client — see http_client.go.
+	return defaultHTTPClient
 }
 
 // SendMessageStream performs the vqd handshake, then streams the reply.

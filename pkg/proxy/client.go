@@ -61,7 +61,12 @@ func CmdProxyUp() {
 
 	ppid := os.Getppid()
 	if ppid > 1 {
-		postAndClose(fmt.Sprintf("%s/_am/session?pid=%d&event=start", ProxyBase(), ppid))
+		// Send both the current ("event") and legacy ("op") param names: a
+		// background `am proxy` process started by an older `am` binary
+		// (still running, unaffected by upgrading the binary on disk) only
+		// understands "op". Sending both means this hook doesn't silently
+		// stop tracking sessions against a stale proxy after an upgrade.
+		postAndClose(fmt.Sprintf("%s/_am/session?pid=%d&event=start&op=start", ProxyBase(), ppid))
 	}
 	postAndClose(ProxyBase() + "/_am/sync")
 }
@@ -115,7 +120,9 @@ func CmdProxyDown(force, yesIKnow bool) {
 
 	ppid := os.Getppid()
 	if ppid > 1 {
-		postAndClose(fmt.Sprintf("%s/_am/session?pid=%d&event=end", ProxyBase(), ppid))
+		// See CmdProxyUp: send both param names for the same stale-proxy
+		// reason.
+		postAndClose(fmt.Sprintf("%s/_am/session?pid=%d&event=end&op=end", ProxyBase(), ppid))
 		return
 	}
 	postAndClose(ProxyBase() + "/_am/shutdown")

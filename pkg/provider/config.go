@@ -3,6 +3,7 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,6 +115,12 @@ func LoadAccounts(path string) ([]types.ProviderAdapter, error) {
 			for _, p := range f.Providers {
 				a, err := BuildAdapter(p)
 				if err != nil {
+					// Surface misconfigured entries instead of silently
+					// shrinking the pool — a typo'd "type" or a missing
+					// required field (e.g. baseUrl) should be visible in the
+					// proxy log, not just show up as "why is my provider
+					// missing" later.
+					log.Printf("am: skip provider %q (type=%q): %v", p.ID, p.Type, err)
 					continue
 				}
 				adapters = append(adapters, a)

@@ -71,12 +71,37 @@ func RunProxy(addr, upstream string) error {
 	}
 	pool := router.NewAccountPoolRouter(adapters)
 
-	target, err := url.Parse(upstream)
+	rp, err := newReverseProxy(upstream, rot)
 	if err != nil {
-		return fmt.Errorf("invalid upstream url %s: %w", upstream, err)
+		return err
 	}
 
-	rp := &httputil.ReverseProxy{
+	var srv *http.Server
+	handler := newHandler(rot, life, mode, pool, rp, upstream, func() {
+		if srv != nil {
+			_ = srv.Close()
+		}
+	})
+	srv = &http.Server{Addr: addr, Handler: handler}
+
+	_ = os.MkdirAll(types.BaseDir(), 0o700)
+	log.Printf("am proxy up on %s, active claude account %q", addr, rot.Active())
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
+}
+
+// newReverseProxy builds the httputil.ReverseProxy that forwards to the real
+// Anthropic API (or whatever `upstream` points at), injecting either the
+// rotator's OAuth token or a caller-supplied API key.
+func newReverseProxy(upstream string, rot *Rotator) (*httputil.ReverseProxy, error) {
+	target, err := url.Parse(upstream)
+	if err != nil {
+		return nil, fmt.Errorf("invalid upstream url %s: %w", upstream, err)
+	}
+
+	return &httputil.ReverseProxy{
 		Director: func(r *http.Request) {
 			r.URL.Scheme = target.Scheme
 			r.URL.Host = target.Host
@@ -110,8 +135,18 @@ func RunProxy(addr, upstream string) error {
 			log.Printf("proxy error: %v", err)
 			http.Error(w, "am proxy: upstream error", http.StatusBadGateway)
 		},
-	}
+	}, nil
+}
 
+// newHandler builds the full HTTP handler serving Claude Code, the OpenAI
+// gateway, and the /_am/ admin endpoints. Split out from RunProxy so it can
+// be exercised directly with httptest (no live listener, no goroutine)
+// instead of only being reachable through a real server socket — see
+// server_test.go. `shutdown` is called by /_am/shutdown instead of closing
+// an *http.Server directly, since the server that wraps this handler
+// doesn't exist yet when the handler is built (RunProxy ties the two
+// together via a closure).
+func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, pool *router.AccountPoolRouter, rp http.Handler, upstream string, shutdown func()) http.Handler {
 	mux := http.NewServeMux()
 
 	// 1. OpenAI Standard Gateway
@@ -159,9 +194,29 @@ func RunProxy(addr, upstream string) error {
 	})
 
 	mux.HandleFunc("/_am/session", func(w http.ResponseWriter, r *http.Request) {
-		pid, _ := strconv.Atoi(r.URL.Query().Get("pid"))
-		ev := r.URL.Query().Get("event")
-		switch ev {
+		pid, err := strconv.Atoi(r.URL.Query().Get("pid"))
+		if err != nil || pid <= 0 {
+			// Reject rather than silently tracking pid=0: pruneDead() below
+			// can never reap it (see lifecycle.go — kill(0, sig) targets the
+			// caller's whole process group and always succeeds), so an
+			// invalid pid here would otherwise create an immortal phantom
+			// session that inflates `am status` and can permanently block
+			// `am proxy down --force`'s attached-session check.
+			http.Error(w, "invalid or missing 'pid'", http.StatusBadRequest)
+			return
+		}
+		// "event" is the current param name; "op" is what the proxy spoke
+		// before the SessionStart/SessionEnd rename (see old proxy.go). A
+		// background `am proxy` process is long-lived and isn't restarted
+		// just because the `am` binary on disk was upgraded, so an
+		// old-server-new-client mismatch is a real rolling-upgrade case, not
+		// just theoretical — accept either so an already-running old-code
+		// proxy and a freshly-built client (or vice versa) still agree.
+		event := r.URL.Query().Get("event")
+		if event == "" {
+			event = r.URL.Query().Get("op")
+		}
+		switch event {
 		case "start":
 			life.AddSession(pid)
 		case "end":
@@ -187,18 +242,15 @@ func RunProxy(addr, upstream string) error {
 		fmt.Fprintf(w, "%d\n", len(rot.Names()))
 	})
 
-	var srv *http.Server
 	mux.HandleFunc("/_am/shutdown", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
 		go func() {
 			time.Sleep(100 * time.Millisecond)
-			if srv != nil {
-				_ = srv.Close()
-			}
+			shutdown()
 		}()
 	})
 
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 
 		// Admin routes
@@ -248,13 +300,4 @@ func RunProxy(addr, upstream string) error {
 		// Fallback reverse proxy
 		rp.ServeHTTP(w, r)
 	})
-
-	srv = &http.Server{Addr: addr, Handler: handler}
-
-	_ = os.MkdirAll(types.BaseDir(), 0o700)
-	log.Printf("am proxy up on %s, active claude account %q", addr, rot.Active())
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return err
-	}
-	return nil
 }

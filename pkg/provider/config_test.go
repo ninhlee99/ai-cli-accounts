@@ -94,6 +94,42 @@ func TestBuildConcatenatedPrompt(t *testing.T) {
 	}
 }
 
+// TestBuildConcatenatedPrompt_SystemOnly locks in the behavior for the edge
+// case flagged in code review: a request with only system message(s) and no
+// user/assistant turns. It must not lose the system content, and it must
+// not panic or produce something the web adapters would send as empty.
+func TestBuildConcatenatedPrompt_SystemOnly(t *testing.T) {
+	msgs := []types.ChatMessage{{Role: "system", Content: "Be terse."}}
+	got := BuildConcatenatedPrompt(msgs)
+	if !strings.Contains(got, "[System Instructions]\nBe terse.") {
+		t.Errorf("expected system instructions preserved, got %q", got)
+	}
+	if !strings.HasSuffix(got, "Assistant:") {
+		t.Errorf("expected trailing 'Assistant:' cue even with no history, got %q", got)
+	}
+	if got == "" {
+		t.Errorf("system-only input must not collapse to an empty prompt")
+	}
+}
+
+// TestBuildConcatenatedPrompt_MultipleSystemMessages verifies that several
+// system messages are merged into one coherent block (fix for the original
+// bug where the "[System Instructions]" header was repeated per message).
+func TestBuildConcatenatedPrompt_MultipleSystemMessages(t *testing.T) {
+	msgs := []types.ChatMessage{
+		{Role: "system", Content: "Be helpful."},
+		{Role: "system", Content: "Be concise."},
+		{Role: "user", Content: "Hi"},
+	}
+	got := BuildConcatenatedPrompt(msgs)
+	if strings.Count(got, "[System Instructions]") != 1 {
+		t.Errorf("expected exactly one '[System Instructions]' header, got %q", got)
+	}
+	if !strings.Contains(got, "Be helpful.") || !strings.Contains(got, "Be concise.") {
+		t.Errorf("expected both system messages preserved, got %q", got)
+	}
+}
+
 func TestBuildAdapter_DefaultsAndMissing(t *testing.T) {
 	// Missing baseUrl for openai_compatible
 	_, err := BuildAdapter(ProviderConfig{Type: "openai_compatible"})

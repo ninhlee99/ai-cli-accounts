@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"os"
 	"sync"
 	"syscall"
@@ -17,6 +18,13 @@ func NewLifecycle() *Lifecycle {
 }
 
 func (l *Lifecycle) AddSession(pid int) {
+	if pid <= 0 {
+		// Defense in depth against the server.go handler's own guard: pid<=0
+		// would never get pruned by pruneDead (kill(0, sig) signals the
+		// caller's process group and always succeeds, it doesn't mean "pid 0
+		// is alive"), so it would sit in the map forever.
+		return
+	}
 	l.mu.Lock()
 	l.pids[pid] = true
 	l.mu.Unlock()
@@ -41,9 +49,24 @@ func (l *Lifecycle) pruneDead() int {
 			delete(l.pids, pid)
 			continue
 		}
-		if err := proc.Signal(syscall.Signal(0)); err != nil {
-			delete(l.pids, pid)
+		err = proc.Signal(syscall.Signal(0))
+		if err == nil {
+			continue // alive and signalable
 		}
+		if errors.Is(err, syscall.EPERM) {
+			// kill(pid, 0) returning EPERM means the kernel found a live
+			// process but refused the signal because we don't own it (e.g.
+			// `am proxy` running as one user, tracking a Claude Code
+			// session launched as another). That's "alive, just not ours"
+			// — not "dead". Treating it as dead (the previous behavior,
+			// which deleted on *any* non-nil error) would silently drop a
+			// live session from `am status` and could let `am proxy down
+			// --force` proceed past its attached-session check while a
+			// real session is still attached.
+			continue
+		}
+		// ESRCH ("no such process") or anything else: actually gone.
+		delete(l.pids, pid)
 	}
 	return len(l.pids)
 }
