@@ -1,6 +1,6 @@
-# Kiến Trúc Dự Án `ai-cli-accounts` (STRUCT.md)
+# Kiến Trúc Dự Án `amux` (STRUCT.md)
 
-Dự án `ai-cli-accounts` (CLI `am`) được thiết kế theo chuẩn kiến trúc dự án Go (**Standard Go Project Layout**), kết hợp các nguyên lý **Domain-Driven Design (DDD)** và **Plugin Architecture**. 
+Dự án `amux` (CLI `am`) được thiết kế theo chuẩn kiến trúc dự án Go (**Standard Go Project Layout**), kết hợp các nguyên lý **Domain-Driven Design (DDD)** và **Plugin Architecture**. 
 
 Tài liệu này mô tả chi tiết cấu trúc thư mục, trách nhiệm của từng package, cùng các luồng dữ liệu (Data Flows) cốt lõi của hệ thống.
 
@@ -9,7 +9,7 @@ Tài liệu này mô tả chi tiết cấu trúc thư mục, trách nhiệm củ
 ## 1. Sơ Đồ Cây Thư Mục
 
 ```
-ai-cli-accounts/
+amux/ (ai-cli-accounts)
 ├── main.go                         # CLI entrypoint mỏng (11 dòng) — chỉ gọi cli.Run(os.Args)
 ├── accounts.example.json           # File cấu hình mẫu cho các Provider
 ├── STRUCT.md                       # Tài liệu tổng quan kiến trúc hệ thống
