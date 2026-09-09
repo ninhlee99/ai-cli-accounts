@@ -96,7 +96,7 @@ func lookupCwd(pid int) string {
 		return ""
 	}
 	for _, line := range strings.Split(string(out), "\n") {
-		if strings.HasPrefix(line, "n/") || (strings.HasPrefix(line, "n") && len(line) > 1 && line[1] == '/') {
+		if strings.HasPrefix(line, "n/") {
 			return line[1:]
 		}
 	}

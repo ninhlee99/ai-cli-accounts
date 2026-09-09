@@ -170,12 +170,6 @@ func idRe(tool string) *regexp.Regexp {
 	return regexp.MustCompile(`^` + regexp.QuoteMeta(tool) + `\d+$`)
 }
 
-func need(args []string, n int) {
-	if len(args) < n {
-		die("not enough arguments (try: am help)")
-	}
-}
-
 
 // resolveName maps what the user typed to a profile name. Matches, in order:
 // the short ID ("claude1"), an exact name, then a unique case-insensitive

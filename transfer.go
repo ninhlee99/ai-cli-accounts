@@ -341,7 +341,7 @@ func mergeBundle(b portableBundle) int {
 			continue
 		}
 		orig := p.Name
-		if _, err := os.Stat(bundlePath(p.Tool, p.Name)); err == nil {
+		if _, err := os.Stat(bundlePath(p.Tool, p.Name)); err == nil || !os.IsNotExist(err) {
 			p.Name = uniqueProfileName(p.Tool, orig, p.Account)
 			fmt.Printf("rename %s/%s already used -> importing as %q\n", p.Tool, orig, p.Name)
 		}

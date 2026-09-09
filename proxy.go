@@ -845,7 +845,12 @@ func proxyForceStop(skipCheck bool) {
 		return
 	}
 	if !skipCheck {
-		if n := attachedSessions(); n > 0 {
+		if n := attachedSessions(); n != 0 {
+			if n < 0 {
+				die("couldn't confirm 0 claude tab(s) attached (status check failed) — "+
+					"stopping now risks leaving one pointed at a dead port. "+
+					"`am proxy down --force --yes-i-know` to stop anyway.")
+			}
 			die("%d claude tab(s) still attached — stopping now leaves them pointed at a dead port "+
 				"(ANTHROPIC_BASE_URL is fixed for the life of that process). "+
 				"Close those tabs first, or `am proxy down --force --yes-i-know` to stop anyway.", n)
@@ -862,16 +867,22 @@ func proxyForceStop(skipCheck bool) {
 	fmt.Println("proxy stopped")
 }
 
+// attachedSessions returns the claude-tab count from the running proxy, or
+// -1 if that can't be confirmed (request/decode failure) — the caller must
+// treat -1 as "unknown, assume attached" rather than as zero, or a stale/
+// misbehaving proxy would silently bypass the force-stop safety check.
 func attachedSessions() int {
 	resp, err := http.Get(proxyBase() + "/_am/status")
 	if err != nil {
-		return 0
+		return -1
 	}
 	defer resp.Body.Close()
 	var s struct {
 		Sessions int `json:"sessions"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&s)
+	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+		return -1
+	}
 	return s.Sessions
 }
 
@@ -905,5 +916,3 @@ func envOr(k, d string) string {
 	}
 	return d
 }
-
-var _ = io.Discard
