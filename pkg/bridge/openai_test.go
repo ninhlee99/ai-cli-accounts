@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"ai-cli-accounts/pkg/bridge"
-	"ai-cli-accounts/pkg/router"
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/bridge"
+	"amux-accounts/pkg/router"
+	"amux-accounts/pkg/types"
 )
 
 type mockStreamAdapter struct {

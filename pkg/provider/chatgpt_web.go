@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/types"
 )
 
 type ChatGPTWebAdapter struct {

@@ -1,4 +1,4 @@
-module ai-cli-accounts
+module amux-accounts
 
 go 1.26.0
 

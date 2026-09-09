@@ -2,12 +2,13 @@ package profile
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/types"
 )
 
 func TestProfile_SanitizeName(t *testing.T) {
@@ -63,6 +64,71 @@ func TestProfile_BundleRoundtrip(t *testing.T) {
 	}
 	if !bytes.Equal(loaded[0].Data, testData) {
 		t.Fatalf("loaded data mismatch: got %s, want %s", string(loaded[0].Data), string(testData))
+	}
+}
+
+func TestProfile_IDPrefixForTool(t *testing.T) {
+	cases := map[string]string{
+		"claude":      "claudecli",
+		"codex":       "codexcli",
+		"gemini":      "geminiweb",
+		"antigravity": "geminicli",
+		"sometool":    "sometoolcli", // unmapped tool falls back to "<tool>cli"
+	}
+	for tool, want := range cases {
+		if got := IDPrefixForTool(tool); got != want {
+			t.Errorf("IDPrefixForTool(%q) = %q, want %q", tool, got, want)
+		}
+	}
+}
+
+func TestProfile_ListProfilesUnifiedIDs(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "am-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	oldDir := os.Getenv("AM_DIR")
+	os.Setenv("AM_DIR", tmpDir)
+	defer os.Setenv("AM_DIR", oldDir)
+
+	tool := "codex"
+	if err := os.MkdirAll(ProfileDir(tool), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for i, name := range []string{"alpha", "beta"} {
+		meta := types.ProfileMeta{
+			Name:    name,
+			Tool:    tool,
+			Account: name + "@example.com",
+			Saved:   time.Now().Add(time.Duration(i) * time.Second),
+		}
+		b, err := json.Marshal(meta)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(MetaPath(tool, name), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := ListProfiles(tool)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 profiles, got %d: %+v", len(got), got)
+	}
+	want := []string{"codexcli:01", "codexcli:02"}
+	for i, m := range got {
+		if m.ID != want[i] {
+			t.Errorf("profile %d (%s): ID = %q, want %q", i, m.Name, m.ID, want[i])
+		}
+	}
+
+	// antigravity is the new placeholder tool: no artifacts/detection logic
+	// yet, so listing it with nothing saved returns zero profiles rather
+	// than erroring.
+	if got := ListProfiles("antigravity"); len(got) != 0 {
+		t.Errorf("expected 0 antigravity profiles, got %d: %+v", len(got), got)
 	}
 }
 

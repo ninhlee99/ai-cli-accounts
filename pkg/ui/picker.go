@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"os"
 
-	"ai-cli-accounts/pkg/profile"
-	"ai-cli-accounts/pkg/provider"
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/profile"
+	"amux-accounts/pkg/provider"
+	"amux-accounts/pkg/types"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
@@ -26,7 +26,7 @@ func PickProfile(tool string) string {
 	}
 	fd := int(os.Stdin.Fd())
 	if !term.IsTerminal(fd) {
-		fmt.Fprintf(os.Stderr, "am sw needs a name when not run in a terminal (e.g. am sw %s1)\n", tool)
+		fmt.Fprintf(os.Stderr, "amux sw needs a name when not run in a terminal (e.g. amux sw %s1)\n", tool)
 		return ""
 	}
 
@@ -110,6 +110,9 @@ func providerMenuEntries() []types.ProfileMeta {
 	f, err := provider.LoadConfigFile(provider.DefaultAccountsPath())
 	if err == nil && f != nil {
 		for _, p := range f.Providers {
+			if !p.IsConfigured() {
+				continue
+			}
 			detail := p.BaseURL
 			if detail == "" {
 				detail = p.Model

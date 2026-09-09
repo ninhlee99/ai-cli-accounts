@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"strings"
 
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/types"
 )
 
 // OpenAICompatibleAdapter wraps any endpoint speaking the OpenAI

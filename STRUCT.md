@@ -9,7 +9,7 @@ Tài liệu này mô tả chi tiết cấu trúc thư mục, trách nhiệm củ
 ## 1. Sơ Đồ Cây Thư Mục
 
 ```
-amux/ (ai-cli-accounts)
+amux/ (amux-accounts)
 ├── main.go                         # CLI entrypoint mỏng (11 dòng) — chỉ gọi cli.Run(os.Args)
 ├── accounts.example.json           # File cấu hình mẫu cho các Provider
 ├── STRUCT.md                       # Tài liệu tổng quan kiến trúc hệ thống

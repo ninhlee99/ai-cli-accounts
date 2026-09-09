@@ -7,8 +7,9 @@ import (
 	"os"
 	"time"
 
-	"ai-cli-accounts/pkg/profile"
-	"ai-cli-accounts/pkg/proxy"
+	"amux-accounts/pkg/hook"
+	"amux-accounts/pkg/profile"
+	"amux-accounts/pkg/proxy"
 )
 
 const (
@@ -19,8 +20,13 @@ const (
 // CmdStatus displays the rich status table for proxy, Claude accounts, and provider pool.
 func CmdStatus() {
 	if !proxy.ProxyUp() {
-		fmt.Printf("proxy:     %s not running (starts automatically when you launch claude, stays up until `am proxy down --force`)\n", dotGray)
-		fmt.Printf("base URL:  https://api.anthropic.com  (direct — no rotation, no auto-switch on rate limit)\n\n")
+		fmt.Printf("proxy:       %s not running (starts automatically when you launch claude, stays up until `amux proxy down --force`)\n", dotGray)
+		fmt.Printf("base URL:    https://api.anthropic.com  (direct — no rotation, no auto-switch on rate limit)\n")
+		if hook.IsAutoUpdateEnabled() {
+			fmt.Printf("auto-update: %s enabled (LaunchAgent checks every 6h)\n\n", dotGreen)
+		} else {
+			fmt.Printf("auto-update: %s disabled (run `amux setup --auto-update` to enable)\n\n", dotGray)
+		}
 		profile.PrintLiveLogins()
 		return
 	}
@@ -66,8 +72,13 @@ func CmdStatus() {
 		addr = "127.0.0.1:8787"
 	}
 
-	fmt.Printf("proxy:     %s running on %s · %d claude tab(s) attached · %d switch(es) this run\n", dotGreen, addr, s.Sessions, s.Switches)
-	fmt.Printf("base URL:  %s  (rotating through %d account(s) below)\n\n", proxy.ProxyBase(), len(s.Accounts))
+	fmt.Printf("proxy:       %s running on %s · %d claude tab(s) attached · %d switch(es) this run\n", dotGreen, addr, s.Sessions, s.Switches)
+	fmt.Printf("base URL:    %s  (rotating through %d account(s) below)\n", proxy.ProxyBase(), len(s.Accounts))
+	if hook.IsAutoUpdateEnabled() {
+		fmt.Printf("auto-update: %s enabled (LaunchAgent checks every 6h)\n\n", dotGreen)
+	} else {
+		fmt.Printf("auto-update: %s disabled (run `amux setup --auto-update` to enable)\n\n", dotGray)
+	}
 
 	for _, a := range s.Accounts {
 		mark := "  "

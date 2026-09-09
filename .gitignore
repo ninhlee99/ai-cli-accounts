@@ -1,5 +1,7 @@
 /am
+/amux
 /ai-cli-accounts
+/amux-accounts
 .am/
 *.amexp
 all-account*

@@ -17,8 +17,8 @@ import (
 	"strings"
 	"time"
 
-	"ai-cli-accounts/pkg/auth"
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/auth"
+	"amux-accounts/pkg/types"
 	"golang.org/x/crypto/scrypt"
 	"golang.org/x/term"
 )
@@ -284,7 +284,7 @@ func CmdExport(args []string) error {
 		case "-o", "--output":
 			i++
 			if i >= len(args) {
-				return fmt.Errorf("usage: am export ... -o <file>")
+				return fmt.Errorf("usage: amux export ... -o <file>")
 			}
 			outPath = args[i]
 		case "--stdout":
@@ -324,7 +324,7 @@ func CmdExport(args []string) error {
 
 	if toStdout {
 		fmt.Println(blob)
-		fmt.Fprintf(os.Stderr, "\nexported %d profile(s). Copy the line above to the other machine and run: am import\n", len(bundle.Profiles))
+		fmt.Fprintf(os.Stderr, "\nexported %d profile(s). Copy the line above to the other machine and run: amux import\n", len(bundle.Profiles))
 		return nil
 	}
 
@@ -334,7 +334,7 @@ func CmdExport(args []string) error {
 	if err := os.WriteFile(outPath, []byte(blob+"\n"), 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", outPath, err)
 	}
-	fmt.Fprintf(os.Stderr, "exported %d profile(s) to %s. Copy that file to the other machine and run: am import -f %s\n", len(bundle.Profiles), outPath, filepath.Base(outPath))
+	fmt.Fprintf(os.Stderr, "exported %d profile(s) to %s. Copy that file to the other machine and run: amux import -f %s\n", len(bundle.Profiles), outPath, filepath.Base(outPath))
 	return nil
 }
 
@@ -386,7 +386,7 @@ func CmdImport(args []string) error {
 		_ = CmdUse(tool, name)
 	}
 	if len(activate) == 0 {
-		fmt.Println("nothing was applied to the system; run `am sw <id>` to switch to one.")
+		fmt.Println("nothing was applied to the system; run `amux sw <id>` to switch to one.")
 	}
 	return nil
 }

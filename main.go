@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"ai-cli-accounts/pkg/cli"
+	"amux-accounts/pkg/cli"
 )
 
 func main() {

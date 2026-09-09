@@ -4,68 +4,89 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
-	"regexp"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
-	"ai-cli-accounts/pkg/env"
-	"ai-cli-accounts/pkg/hook"
-	"ai-cli-accounts/pkg/profile"
-	"ai-cli-accounts/pkg/provider"
-	"ai-cli-accounts/pkg/proxy"
-	"ai-cli-accounts/pkg/ui"
-	"ai-cli-accounts/pkg/usage"
+	"amux-accounts/pkg/env"
+	"amux-accounts/pkg/hook"
+	"amux-accounts/pkg/profile"
+	"amux-accounts/pkg/provider"
+	"amux-accounts/pkg/proxy"
+	"amux-accounts/pkg/types"
+	"amux-accounts/pkg/ui"
+	"amux-accounts/pkg/usage"
 )
 
-const feedbackRepo = "ninhlee99/ai-cli-accounts"
+const feedbackRepo = "ninhlee99/amux"
 
 func die(format string, a ...any) {
-	fmt.Fprintf(os.Stderr, "am: "+format+"\n", a...)
+	fmt.Fprintf(os.Stderr, "amux: "+format+"\n", a...)
 	os.Exit(1)
 }
 
 func usageHelp() {
-	fmt.Print(`am - AI CLI account manager & Local AI Gateway
+	fmt.Print(`amux - AI CLI account manager & Local AI Gateway
 
 Setup (once):
-  am setup                  do it all: hook install + /am:feedback slash command
+  amux setup [--auto-update]  do it all: hook install + /am:feedback + auto-update
 
 Account Profiles:
-  am add [tool] [name]      save active account into a profile (default: claude)
-  am ls [tool]              list saved profiles with short IDs (claude1, ...)
-  am rm <id|name>           move a profile to trash (asks first)
-  am rename <id|name> <new> rename a profile
-  am restore <id|name>      restore a trashed profile
-  am restore --backup       re-import latest auto-backup
-  am sw                     interactive account & provider picker (↑/↓, Enter)
-  am sw <id|name|provider>  switch to a specific account or LLM provider
-  am current [tool]         print the currently active account on system
-  am status                 proxy state, rate limits (5h/7d), provider pool
+  amux add [tool] [name]      save active account into a profile (default: claude)
+  amux ls [tool]              list saved profiles with short IDs (claude1, ...)
+  amux rm <id|name>           move a profile to trash (asks first)
+  amux rename <id|name> <new> rename a profile
+  amux restore <id|name>      restore a trashed profile
+  amux restore --backup       re-import latest auto-backup
+  amux sw                     interactive account & provider picker (↑/↓, Enter)
+  amux sw <id|name|provider>  switch to a specific account or LLM provider
+  amux current [tool]         print the currently active account on system
+  amux status                 proxy state, rate limits (5h/7d), provider pool
 
 Multi-Provider Gateway & Plugins:
-  am login [provider]       login chatgpt, claude, gemini, github, groq
-  am accounts               list multi-provider accounts in pool
-  am api add <name> --endpoint <url> --api-key <key> [--model M] [--priority N]
+  amux login [provider] [--model M]
+                            login chatgpt, claude, gemini, github, groq (each login adds a
+                            new session — you can hold several accounts per provider and
+                            the pool fails over between them on rate limit); --model
+                            overrides that provider's default model
+  amux accounts               list multi-provider accounts in pool, sorted by priority
+  amux accounts priority <id> <N>
+                            set a pool account's priority (lower = tried first); hot-reloads
+                            a running proxy, no restart needed
+  amux accounts model <id> <model>
+                            change a pool account's model; hot-reloads a running proxy
+  amux api add <name> --endpoint <url> --api-key <key> [--model M] [--priority N]
                             add OpenAI-compatible provider
-  am api rm <name>          remove provider
-  am api ls                 list provider accounts
-  am chat [prompt]          interactive terminal chat via multi-provider pool
+  amux api rm <name>          remove provider
+  amux api ls                 list provider accounts
+  amux chat [--provider <id>] [prompt]
+                            interactive terminal chat via multi-provider pool; --provider
+                            pins the session to one pool account instead of the whole pool
+
+  Note: once a codex profile is logged in (amux add codex), its ChatGPT-subscription
+  token is automatically reused as an extra pool adapter (codexcli:NN, type codex_cli) —
+  no separate login needed. It calls an undocumented ChatGPT backend endpoint the same
+  way this CLI's other *-web adapters do, so it may break if OpenAI changes that API.
 
 Monitoring & Utilities:
-  am usage [day|week|month|all] [-D|--detail] [-d YYYY-MM-DD] [-p PROJECT]
+  amux update [--force] [--quiet]
+                            update amux to latest version from github (keeps all accounts)
+  amux usage [day|week|month|all] [-D|--detail] [-d YYYY-MM-DD] [-p PROJECT]
                             token usage analytics
-  am run <tool> [args...]   exec tool (currently: claude) routed through the proxy
-  am proxy [up|down]        run or manage background proxy daemon (default :8787)
-  am env                    print export ANTHROPIC_BASE_URL=... for eval "$(am env)"
-  am hook [install|uninstall|status]
-  am export [tool] [name..] [-o file|--stdout]  encrypted profile bundle
-  am import [-f file] [--activate tool=name]
-  am feedback               file a GitHub issue for bugs or ideas
+  amux run <tool> [args...]   exec tool (currently: claude) routed through the proxy
+  amux proxy [up|down]        run or manage background proxy daemon (default :8787)
+  amux env                    print export ANTHROPIC_BASE_URL=... for eval "$(amux env)"
+  amux hook [install|uninstall|status]
+  amux export [tool] [name..] [-o file|--stdout]  encrypted profile bundle
+  amux import [-f file] [--activate tool=name]
+  amux feedback               file a GitHub issue for bugs or ideas
 `)
 }
 
@@ -76,6 +97,14 @@ func Run(rawArgs []string) {
 		return
 	}
 
+	// One-time (cheap-after-first-run) migration of the old fixed-literal
+	// pool provider IDs (claude-web, chatgpt-web, ...) to the unified
+	// "<prefix>:<NN>" format. Runs before dispatch so every subcommand sees
+	// already-migrated IDs.
+	if err := provider.MigrateLegacyIDs(provider.DefaultAccountsPath()); err != nil {
+		fmt.Fprintf(os.Stderr, "amux: warning: could not migrate account IDs: %v\n", err)
+	}
+
 	cmd := rawArgs[1]
 	args := rawArgs[2:]
 
@@ -84,7 +113,20 @@ func Run(rawArgs []string) {
 		usageHelp()
 
 	case "setup":
-		cmdSetup()
+		cmdSetup(args)
+
+	case "update", "upgrade":
+		force := false
+		quiet := false
+		for _, a := range args {
+			if a == "--force" || a == "-f" {
+				force = true
+			}
+			if a == "--quiet" || a == "-q" {
+				quiet = true
+			}
+		}
+		cmdUpdate(force, quiet)
 
 	case "a", "add":
 		tool, name := toolAndName(args)
@@ -96,18 +138,18 @@ func Run(rawArgs []string) {
 	case "rm", "remove", "delete":
 		tool, name := toolAndName(args)
 		if name == "" {
-			die("usage: am rm [tool] <name>   (name, ID, or part of the email)")
+			die("usage: amux rm [tool] <name>   (name, ID, or part of the email)")
 		}
 		cmdRm(tool, resolveName(tool, name))
 
 	case "rename", "mv":
 		if len(args) < 2 {
-			die("usage: am rename [tool] <id|name> <new-name>")
+			die("usage: amux rename [tool] <id|name> <new-name>")
 		}
 		tool, name := toolAndName(args[:len(args)-1])
 		newName := args[len(args)-1]
 		if name == "" {
-			die("usage: am rename [tool] <id|name> <new-name>")
+			die("usage: amux rename [tool] <id|name> <new-name>")
 		}
 		cmdRename(tool, resolveName(tool, name), newName)
 
@@ -118,7 +160,7 @@ func Run(rawArgs []string) {
 		}
 		tool, name := toolAndName(args)
 		if name == "" {
-			die("usage: am restore [tool] <id|name> | am restore --backup")
+			die("usage: amux restore [tool] <id|name> | amux restore --backup")
 		}
 		if err := profile.RestoreProfile(tool, name); err != nil {
 			die("%v", err)
@@ -162,7 +204,7 @@ func Run(rawArgs []string) {
 		ui.CmdLogin(args)
 
 	case "accounts":
-		ui.CmdAccounts()
+		ui.CmdAccountsCmd(args)
 
 	case "api":
 		ui.CmdAPI(args)
@@ -184,7 +226,7 @@ func Run(rawArgs []string) {
 		switch args[0] {
 		case "set":
 			if len(args) < 3 {
-				die("am env set KEY VALUE")
+				die("amux env set KEY VALUE")
 			}
 			m := env.LoadEnvVars()
 			m[args[1]] = args[2]
@@ -192,7 +234,7 @@ func Run(rawArgs []string) {
 			fmt.Fprintf(os.Stderr, "set %s\n", args[1])
 		case "get":
 			if len(args) < 2 {
-				die("am env get KEY")
+				die("amux env get KEY")
 			}
 			v, ok := env.LoadEnvVars()[args[1]]
 			if !ok {
@@ -201,7 +243,7 @@ func Run(rawArgs []string) {
 			fmt.Println(v)
 		case "rm", "unset":
 			if len(args) < 2 {
-				die("am env rm KEY")
+				die("amux env rm KEY")
 			}
 			m := env.LoadEnvVars()
 			delete(m, args[1])
@@ -213,7 +255,7 @@ func Run(rawArgs []string) {
 				fmt.Printf("%s=%s\n", k, v)
 			}
 		default:
-			die("am env: [set KEY VALUE | get KEY | rm KEY | list]")
+			die("amux env: [set KEY VALUE | get KEY | rm KEY | list]")
 		}
 
 	case "hook":
@@ -234,7 +276,7 @@ func Run(rawArgs []string) {
 		case "status":
 			cmdHookStatus()
 		default:
-			die("am hook: install | uninstall | status")
+			die("amux hook: install | uninstall | status")
 		}
 
 	case "proxy":
@@ -260,6 +302,7 @@ func Run(rawArgs []string) {
 		}
 		addr := "127.0.0.1:8787"
 		upstream := "https://api.anthropic.com"
+		supervise := false
 		for i := 0; i < len(args); i++ {
 			switch args[i] {
 			case "--addr":
@@ -272,7 +315,20 @@ func Run(rawArgs []string) {
 					upstream = args[i+1]
 					i++
 				}
+			case "--supervise":
+				// Internal: how CmdProxyUp spawns the daemon (watchdog +
+				// Anthropic-direct fallback wrapper around the real
+				// server, see pkg/proxy/supervisor.go). Not meant to be
+				// typed by hand, but not hidden either — --addr/--upstream
+				// aren't either.
+				supervise = true
 			}
+		}
+		if supervise {
+			if err := proxy.RunSupervisor(addr, upstream); err != nil {
+				die("proxy supervisor error: %v", err)
+			}
+			return
 		}
 		if err := proxy.RunProxy(addr, upstream); err != nil {
 			die("proxy error: %v", err)
@@ -293,7 +349,7 @@ func Run(rawArgs []string) {
 		cmdFeedback(args)
 
 	default:
-		die("unknown command %q — run 'am help' for usage", cmd)
+		die("unknown command %q — run 'amux help' for usage", cmd)
 	}
 }
 
@@ -305,9 +361,11 @@ func toolAndName(rest []string) (tool, name string) {
 		}
 	}
 	joined := strings.Join(rest, " ")
-	for t := range tools {
-		if regexp.MustCompile(`^` + regexp.QuoteMeta(t) + `\d+$`).MatchString(joined) {
-			return t, joined
+	if prefix, _, ok := types.ParseID(joined); ok {
+		for t := range tools {
+			if profile.IDPrefixForTool(t) == prefix {
+				return t, joined
+			}
 		}
 	}
 	return "claude", joined
@@ -398,7 +456,7 @@ func cmdAdd(tool, name string) {
 		if _, err := profile.CmdSave(tool, pName); err != nil {
 			die("save failed: %v", err)
 		}
-		fmt.Printf("\nto add a different account: log into it in %s, then run `am add %s` again.\n", tool, tool)
+		fmt.Printf("\nto add a different account: log into it in %s, then run `amux add %s` again.\n", tool, tool)
 		return
 	}
 	loginHint(tool)
@@ -508,12 +566,12 @@ func orDash(s string) string {
 // rotation for free instead of talking to the upstream API directly.
 func cmdRun(args []string) {
 	if len(args) < 1 {
-		die("am run <tool> [args...]")
+		die("amux run <tool> [args...]")
 	}
 	tool := args[0]
 	rest := args[1:]
 	if tool != "claude" {
-		die("am run currently supports: claude")
+		die("amux run currently supports: claude")
 	}
 	base := proxy.ProxyBase()
 	if !proxy.ProxyUp() {
@@ -532,7 +590,18 @@ func cmdRun(args []string) {
 }
 
 
-func cmdSetup() {
+func cmdSetup(args []string) {
+	autoUpdate := false
+	disableAutoUpdate := false
+	for _, a := range args {
+		if a == "--auto-update" || a == "-u" {
+			autoUpdate = true
+		}
+		if a == "--no-auto-update" || a == "--disable-auto-update" {
+			disableAutoUpdate = true
+		}
+	}
+
 	fmt.Println("== Setting up Claude Code hook ==")
 	cmdHookInstall()
 
@@ -541,14 +610,30 @@ func cmdSetup() {
 		fmt.Printf("Slash command error: %v\n", err)
 	}
 
-	fmt.Println("\nsetup done. Open a new shell, then: am add   (save your first account)")
+	if autoUpdate {
+		fmt.Println("\n== Setting up Auto-Update (LaunchAgent & Background Check) ==")
+		if err := hook.SetupAutoUpdate(true); err != nil {
+			fmt.Printf("Auto-update error: %v\n", err)
+		} else {
+			fmt.Println("✓ Đã kích hoạt tự động cập nhật (kiểm tra bản mới mỗi 6 tiếng qua LaunchAgent).")
+		}
+	} else if disableAutoUpdate {
+		_ = hook.SetupAutoUpdate(false)
+		fmt.Println("\n✓ Đã tắt tự động cập nhật.")
+	} else if hook.IsAutoUpdateEnabled() {
+		fmt.Println("\n✓ Tự động cập nhật hiện đang BẬT.")
+	} else {
+		fmt.Println("\n💡 Mẹo: Chạy `amux setup --auto-update` để tự động nâng cấp mỗi khi có bản mới.")
+	}
+
+	fmt.Println("\nsetup done. Open a new shell, then: amux add   (save your first account)")
 }
 
 func cmdHookInstall() {
 	if err := hook.HookInstall(); err != nil {
 		die("hook install: %v", err)
 	}
-	fmt.Printf("installed hooks in %s\n  SessionStart -> am proxy up\n  SessionEnd   -> am proxy down\n  Stop         -> am proxy down\n\n", hook.ClaudeSettingsPath())
+	fmt.Printf("installed hooks in %s\n  SessionStart -> amux proxy up\n  SessionEnd   -> amux proxy down\n  Stop         -> amux proxy down\n\n", hook.ClaudeSettingsPath())
 
 	line := `eval "$(am env)"`
 	rc := hook.ShellRC()
@@ -565,7 +650,7 @@ func cmdHookInstall() {
 	r := bufio.NewReader(os.Stdin)
 	ans, _ := r.ReadString('\n')
 	if strings.EqualFold(strings.TrimSpace(ans), "y") {
-		if err := hook.AppendLine(rc, "\n# ai-cli-accounts: route claude through the rotating proxy\n"+line+"\n"); err != nil {
+		if err := hook.AppendLine(rc, "\n# amux-accounts: route claude through the rotating proxy\n"+line+"\n"); err != nil {
 			fmt.Printf("append failed: %v\n", err)
 			return
 		}
@@ -578,17 +663,17 @@ func cmdHookInstall() {
 func cmdHookStatus() {
 	events := hook.InstalledEvents()
 	if len(events) == 0 {
-		fmt.Println("hooks: not installed  (am hook install)")
+		fmt.Println("hooks: not installed  (amux hook install)")
 	} else {
 		for _, ev := range events {
-			fmt.Printf("hook: %s -> am proxy\n", ev)
+			fmt.Printf("hook: %s -> amux proxy\n", ev)
 		}
 	}
 	switch os.Getenv("ANTHROPIC_BASE_URL") {
 	case proxy.ProxyBase():
 		fmt.Printf("ANTHROPIC_BASE_URL: %s\n", proxy.ProxyBase())
 	case "":
-		fmt.Println("ANTHROPIC_BASE_URL: not set — claude will bypass the proxy (run `am hook install` to wire `am env`)")
+		fmt.Println("ANTHROPIC_BASE_URL: not set — claude will bypass the proxy (run `amux hook install` to wire `am env`)")
 	default:
 		fmt.Printf("ANTHROPIC_BASE_URL: %s  (not the proxy)\n", os.Getenv("ANTHROPIC_BASE_URL"))
 	}
@@ -665,7 +750,7 @@ func cmdFeedback(args []string) {
 		cmd.Stderr = os.Stderr
 		cmd.Stdin = os.Stdin
 		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "am: gh issue create failed (%v) — opening browser instead\n", err)
+			fmt.Fprintf(os.Stderr, "amux: gh issue create failed (%v) — opening browser instead\n", err)
 		} else {
 			return
 		}
@@ -686,5 +771,258 @@ func cmdFeedback(args []string) {
 	}
 	if err := openCmd.Start(); err != nil {
 		fmt.Println("couldn't launch a browser — open the URL above manually.")
+	}
+}
+
+func copyExecutable(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	dir := filepath.Dir(dst)
+	_ = os.MkdirAll(dir, 0o755)
+
+	// If directory is writable, use atomic rename via temp file
+	tmpDst := filepath.Join(dir, fmt.Sprintf(".amux-tmp-%d", time.Now().UnixNano()))
+	out, err := os.OpenFile(tmpDst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err == nil {
+		if _, err := io.Copy(out, in); err != nil {
+			out.Close()
+			_ = os.Remove(tmpDst)
+			return err
+		}
+		if err := out.Close(); err != nil {
+			_ = os.Remove(tmpDst)
+			return err
+		}
+		_ = os.Chmod(tmpDst, 0o755)
+		return os.Rename(tmpDst, dst)
+	}
+
+	// Fallback: overwrite directly if dst itself is writable
+	out, err = os.OpenFile(dst, os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
+}
+
+type versionInfo struct {
+	Commit    string `json:"commit"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+func getInstalledCommit() string {
+	home, _ := os.UserHomeDir()
+	p := filepath.Join(home, ".am", "version.json")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return ""
+	}
+	var vi versionInfo
+	if json.Unmarshal(b, &vi) == nil {
+		return vi.Commit
+	}
+	return ""
+}
+
+func saveInstalledCommit(commit string) {
+	home, _ := os.UserHomeDir()
+	p := filepath.Join(home, ".am", "version.json")
+	vi := versionInfo{
+		Commit:    commit,
+		UpdatedAt: time.Now().Format(time.RFC3339),
+	}
+	b, _ := json.MarshalIndent(vi, "", "  ")
+	_ = os.WriteFile(p, b, 0o644)
+}
+
+func getRemoteHeadCommit(repoURL string) (string, error) {
+	cmd := exec.Command("git", "ls-remote", repoURL, "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return "", fmt.Errorf("empty response from git ls-remote")
+	}
+	return fields[0], nil
+}
+
+func cmdUpdate(force, quiet bool) {
+	if !quiet {
+		fmt.Println("== Cập nhật amux lên phiên bản mới nhất ==")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		if !quiet {
+			die("yêu cầu cài đặt 'git' trước khi cập nhật")
+		}
+		return
+	}
+	if _, err := exec.LookPath("go"); err != nil {
+		if !quiet {
+			die("yêu cầu cài đặt 'go' (>= 1.22) trước khi cập nhật")
+		}
+		return
+	}
+
+	repoURL := "https://github.com/ninhlee99/amux.git"
+	remoteCommit, _ := getRemoteHeadCommit(repoURL)
+	localCommit := getInstalledCommit()
+
+	if !force && remoteCommit != "" && localCommit != "" && localCommit == remoteCommit {
+		if quiet {
+			return
+		}
+		short := remoteCommit
+		if len(short) > 7 {
+			short = short[:7]
+		}
+		fmt.Printf("amux đã ở phiên bản mới nhất (commit: %s). Dùng `amux update --force` nếu muốn build lại.\n", short)
+		return
+	}
+
+	var buildDir string
+	cwd, _ := os.Getwd()
+	isLocalRepo := false
+	if fi, err := os.Stat(filepath.Join(cwd, "main.go")); err == nil && !fi.IsDir() {
+		if fi, err := os.Stat(filepath.Join(cwd, ".git")); err == nil && fi.IsDir() {
+			isLocalRepo = true
+		}
+	}
+
+	if isLocalRepo {
+		if !quiet {
+			fmt.Printf("Phát hiện mã nguồn tại %s, đang kiểm tra cập nhật (git pull)...\n", cwd)
+		}
+		pullCmd := exec.Command("git", "pull", "origin", "main")
+		pullCmd.Dir = cwd
+		if !quiet {
+			pullCmd.Stdout = os.Stdout
+			pullCmd.Stderr = os.Stderr
+		}
+		if err := pullCmd.Run(); err != nil && !quiet {
+			fmt.Println("Cảnh báo: git pull thất bại, tiếp tục biên dịch từ source hiện tại...")
+		}
+		buildDir = cwd
+	} else {
+		tmp, err := os.MkdirTemp("", "amux-update-*")
+		if err != nil {
+			if !quiet {
+				die("không thể tạo thư mục tạm: %v", err)
+			}
+			return
+		}
+		defer os.RemoveAll(tmp)
+
+		if !quiet {
+			fmt.Printf("Đang tải mã nguồn mới nhất từ %s...\n", repoURL)
+		}
+		cloneCmd := exec.Command("git", "clone", "--depth", "1", repoURL, filepath.Join(tmp, "amux"))
+		if !quiet {
+			cloneCmd.Stdout = os.Stdout
+			cloneCmd.Stderr = os.Stderr
+		}
+		if err := cloneCmd.Run(); err != nil {
+			if !quiet {
+				die("tải mã nguồn thất bại: %v", err)
+			}
+			return
+		}
+		buildDir = filepath.Join(tmp, "amux")
+	}
+
+	if !quiet {
+		fmt.Println("Đang biên dịch binary amux...")
+	}
+	tempBin := filepath.Join(os.TempDir(), fmt.Sprintf("am-build-%d", time.Now().UnixNano()))
+	buildCmd := exec.Command("go", "build", "-o", tempBin, ".")
+	buildCmd.Dir = buildDir
+	if !quiet {
+		buildCmd.Stdout = os.Stdout
+		buildCmd.Stderr = os.Stderr
+	}
+	if err := buildCmd.Run(); err != nil {
+		if !quiet {
+			die("biên dịch thất bại: %v", err)
+		}
+		return
+	}
+	defer os.Remove(tempBin)
+
+	home, _ := os.UserHomeDir()
+	localBin := filepath.Join(home, ".local", "bin")
+	_ = os.MkdirAll(localBin, 0o755)
+
+	installPaths := []string{filepath.Join(localBin, "am")}
+
+	if self, err := os.Executable(); err == nil {
+		resolved, err := filepath.EvalSymlinks(self)
+		if err == nil && resolved != "" && resolved != filepath.Join(localBin, "am") {
+			installPaths = append(installPaths, resolved)
+		}
+	}
+
+	usrLocalAm := "/usr/local/bin/am"
+	if fi, err := os.Stat(usrLocalAm); err == nil && !fi.IsDir() {
+		if f, err := os.OpenFile(usrLocalAm, os.O_WRONLY, 0); err == nil {
+			f.Close()
+			found := false
+			for _, p := range installPaths {
+				if p == usrLocalAm {
+					found = true
+					break
+				}
+			}
+			if !found {
+				installPaths = append(installPaths, usrLocalAm)
+			}
+		}
+	}
+
+	for _, p := range installPaths {
+		if err := copyExecutable(tempBin, p); err != nil {
+			if !quiet {
+				fmt.Printf("Cảnh báo: Không thể ghi vào %s: %v\n", p, err)
+			}
+		} else {
+			if !quiet {
+				fmt.Printf("✓ Đã cập nhật binary: %s\n", p)
+			}
+			linkPath := filepath.Join(filepath.Dir(p), "amux")
+			_ = os.Remove(linkPath)
+			_ = os.Symlink(p, linkPath)
+			if !quiet {
+				fmt.Printf("✓ Đã liên kết alias: %s -> %s\n", linkPath, p)
+			}
+		}
+	}
+
+	if remoteCommit != "" {
+		saveInstalledCommit(remoteCommit)
+	} else if isLocalRepo {
+		if out, err := exec.Command("git", "-C", cwd, "rev-parse", "HEAD").Output(); err == nil {
+			saveInstalledCommit(strings.TrimSpace(string(out)))
+		}
+	}
+
+	cmdSetup(nil)
+
+	if proxy.ProxyUp() {
+		if !quiet {
+			fmt.Println("Đang khởi động lại proxy daemon với phiên bản mới...")
+		}
+		proxy.CmdProxyDown(true, true)
+		time.Sleep(500 * time.Millisecond)
+		proxy.CmdProxyUp()
+	}
+
+	if !quiet {
+		fmt.Println("\n🎉 Cập nhật thành công! Dữ liệu hồ sơ & tài khoản tại ~/.am/ được giữ nguyên vẹn 100%.")
 	}
 }

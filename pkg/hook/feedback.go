@@ -15,7 +15,7 @@ Run ` + "`am feedback $ARGUMENTS`" + ` in the shell.
 
 ` + "`am feedback`" + ` prompts (in the terminal) for a title if none was given, then a
 multi-line body ended by a blank line, then either:
-- shells out to ` + "`gh issue create -R ninhlee99/ai-cli-accounts`" + ` if ` + "`gh`" + ` is
+- shells out to ` + "`gh issue create -R ninhlee99/amux`" + ` if ` + "`gh`" + ` is
   installed and authenticated, or
 - opens a prefilled ` + "`github.com/.../issues/new?...`" + ` URL in the browser.
 

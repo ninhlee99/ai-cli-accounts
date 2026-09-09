@@ -14,12 +14,12 @@ import (
 	"sync"
 	"time"
 
-	"ai-cli-accounts/pkg/bridge"
-	"ai-cli-accounts/pkg/profile"
-	"ai-cli-accounts/pkg/provider"
-	"ai-cli-accounts/pkg/router"
-	"ai-cli-accounts/pkg/types"
-	"ai-cli-accounts/pkg/usage"
+	"amux-accounts/pkg/bridge"
+	"amux-accounts/pkg/profile"
+	"amux-accounts/pkg/provider"
+	"amux-accounts/pkg/router"
+	"amux-accounts/pkg/types"
+	"amux-accounts/pkg/usage"
 )
 
 type ProxyMode struct {
@@ -42,6 +42,35 @@ func (m *ProxyMode) Set(v string) {
 	m.mu.Unlock()
 }
 
+// swappableHandler lets /_am/shutdown swap in a stripped-down passthrough
+// handler (see passthrough.go) for a brief grace window before the socket
+// actually closes, without needing to rebind the port — the *http.Server
+// always points at one of these, and only its target changes.
+type swappableHandler struct {
+	mu sync.RWMutex
+	h  http.Handler
+}
+
+func (s *swappableHandler) Set(h http.Handler) {
+	s.mu.Lock()
+	s.h = h
+	s.mu.Unlock()
+}
+
+func (s *swappableHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	h := s.h
+	s.mu.RUnlock()
+	h.ServeHTTP(w, r)
+}
+
+// shutdownGrace is how long /_am/shutdown keeps serving Anthropic-direct
+// (see swappableHandler, newPassthroughHandler) after being asked to stop,
+// when at least one claude session is still attached — long enough for a
+// request already in flight to land somewhere real instead of getting
+// connection-refused, short enough that `am proxy down` doesn't hang.
+const shutdownGrace = 3 * time.Second
+
 // RunProxy starts the server on the given address, serving Claude Code,
 // OpenAI gateway, and administrative endpoints.
 func RunProxy(addr, upstream string) error {
@@ -59,16 +88,7 @@ func RunProxy(addr, upstream string) error {
 	life := NewLifecycle()
 	mode := &ProxyMode{}
 
-	adapters, err := provider.LoadAccounts(provider.DefaultAccountsPath())
-	if err != nil || len(adapters) == 0 {
-		adapters = []types.ProviderAdapter{
-			&provider.DuckDuckGoAdapter{
-				AdapterID:   "duckduckgo",
-				TargetModel: "claude-3-haiku-20240307",
-				PriorityLvl: 99,
-			},
-		}
-	}
+	adapters, _ := provider.LoadAccounts(provider.DefaultAccountsPath())
 	pool := router.NewAccountPoolRouter(adapters)
 
 	rp, err := newReverseProxy(upstream, rot)
@@ -76,16 +96,18 @@ func RunProxy(addr, upstream string) error {
 		return err
 	}
 
+	sw := &swappableHandler{}
 	var srv *http.Server
-	handler := newHandler(rot, life, mode, pool, rp, upstream, func() {
+	handler := newHandler(rot, life, mode, pool, rp, upstream, sw, func() {
 		if srv != nil {
 			_ = srv.Close()
 		}
 	})
-	srv = &http.Server{Addr: addr, Handler: handler}
+	sw.Set(handler)
+	srv = &http.Server{Addr: addr, Handler: sw}
 
 	_ = os.MkdirAll(types.BaseDir(), 0o700)
-	log.Printf("am proxy up on %s, active claude account %q", addr, rot.Active())
+	log.Printf("amux proxy up on %s, active claude account %q", addr, rot.Active())
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}
@@ -133,7 +155,7 @@ func newReverseProxy(upstream string, rot *Rotator) (*httputil.ReverseProxy, err
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Printf("proxy error: %v", err)
-			http.Error(w, "am proxy: upstream error", http.StatusBadGateway)
+			http.Error(w, "amux proxy: upstream error", http.StatusBadGateway)
 		},
 	}, nil
 }
@@ -146,7 +168,7 @@ func newReverseProxy(upstream string, rot *Rotator) (*httputil.ReverseProxy, err
 // an *http.Server directly, since the server that wraps this handler
 // doesn't exist yet when the handler is built (RunProxy ties the two
 // together via a closure).
-func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, pool *router.AccountPoolRouter, rp http.Handler, upstream string, shutdown func()) http.Handler {
+func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, pool *router.AccountPoolRouter, rp http.Handler, upstream string, sw *swappableHandler, shutdown func()) http.Handler {
 	mux := http.NewServeMux()
 
 	// 1. OpenAI Standard Gateway
@@ -245,7 +267,20 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, pool *router.Acc
 	mux.HandleFunc("/_am/shutdown", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
 		go func() {
-			time.Sleep(100 * time.Millisecond)
+			if life.Sessions() > 0 {
+				// Hand off to Anthropic-direct passthrough for a short
+				// grace window instead of yanking the socket out from
+				// under an attached claude session — see swappableHandler
+				// and shutdownGrace above.
+				if ph, err := newPassthroughHandler(rot, life, upstream, false, nil); err == nil {
+					sw.Set(ph)
+				} else {
+					log.Printf("amux proxy: grace-drain passthrough unavailable: %v", err)
+				}
+				time.Sleep(shutdownGrace)
+			} else {
+				time.Sleep(100 * time.Millisecond)
+			}
 			shutdown()
 		}()
 	})

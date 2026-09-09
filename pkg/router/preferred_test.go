@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/types"
 )
 
 type dummyAdapter struct {

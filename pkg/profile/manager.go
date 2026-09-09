@@ -16,8 +16,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"ai-cli-accounts/pkg/auth"
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/auth"
+	"amux-accounts/pkg/types"
 )
 
 func ProfileDir(tool string) string {
@@ -46,6 +46,27 @@ func WriteActivePointer(tool, name string) {
 	_ = os.WriteFile(ActivePath(tool), []byte(name), 0o600)
 }
 
+// profileIDPrefix maps a Profile-system tool name to the unified ID prefix
+// used for its profiles (see types.FormatID). Tools not listed here fall
+// back to "<tool>cli" so a future tool never ends up with a blank/panicking
+// prefix.
+var profileIDPrefix = map[string]string{
+	"claude":      "claudecli",
+	"codex":       "codexcli",
+	"gemini":      "geminiweb",
+	"antigravity": "geminicli",
+}
+
+// IDPrefixForTool returns the unified-ID prefix for a Profile-system tool
+// (e.g. "claude" -> "claudecli"). Exported so callers like cli.toolAndName
+// can recognize a bare ID's tool without duplicating the prefix table.
+func IDPrefixForTool(tool string) string {
+	if p, ok := profileIDPrefix[tool]; ok {
+		return p
+	}
+	return tool + "cli"
+}
+
 func ListProfiles(tool string) []types.ProfileMeta {
 	des, _ := os.ReadDir(ProfileDir(tool))
 	var out []types.ProfileMeta
@@ -68,8 +89,9 @@ func ListProfiles(tool string) []types.ProfileMeta {
 		}
 		return out[i].Name < out[j].Name
 	})
+	prefix := IDPrefixForTool(tool)
 	for i := range out {
-		out[i].ID = fmt.Sprintf("%s%d", tool, i+1)
+		out[i].ID = types.FormatID(prefix, i+1)
 	}
 	return out
 }
@@ -371,25 +393,25 @@ func InstallActiveProfile(name string) bool {
 		}
 		if auth.TokenExpiryNeedsRefresh(c.ClaudeAiOauth.ExpiresAt) {
 			if c.ClaudeAiOauth.RefreshToken == "" {
-				log.Printf("am: token for claude/%s is expired and has no refresh token", name)
+				log.Printf("amux: token for claude/%s is expired and has no refresh token", name)
 				ok = false
 				break
 			}
 			rr, err := auth.RefreshClaudeToken(c.ClaudeAiOauth.RefreshToken)
 			if err != nil {
-				log.Printf("am: refresh token for claude/%s failed: %v", name, err)
+				log.Printf("amux: refresh token for claude/%s failed: %v", name, err)
 				ok = false
 				break
 			}
 			newData, _, err := auth.RefreshedCredsJSON(e.Data, rr, c.ClaudeAiOauth.RefreshToken)
 			if err != nil {
-				log.Printf("am: rebuild refreshed creds for claude/%s failed: %v", name, err)
+				log.Printf("amux: rebuild refreshed creds for claude/%s failed: %v", name, err)
 				ok = false
 				break
 			}
 			entries[i].Data = newData
 			if err := UpdateProfileEntry("claude", name, entries[i]); err != nil {
-				log.Printf("am: could not persist refreshed token into bundle claude/%s: %v", name, err)
+				log.Printf("amux: could not persist refreshed token into bundle claude/%s: %v", name, err)
 			}
 		}
 		break
@@ -544,7 +566,7 @@ func SyncActiveFromSystem(tool string) {
 	name := ProfileNameForAccount(tool, acct)
 	if name == "" {
 		name = SanitizeName(acct)
-		fmt.Printf("am: current %s login %q not saved yet — snapshotting it\n", tool, acct)
+		fmt.Printf("amux: current %s login %q not saved yet — snapshotting it\n", tool, acct)
 		_, _ = CmdSave(tool, name)
 		return
 	}

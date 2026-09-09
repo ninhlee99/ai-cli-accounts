@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"ai-cli-accounts/pkg/types"
+	"amux-accounts/pkg/types"
 )
 
 func TestUsage_Commas(t *testing.T) {
