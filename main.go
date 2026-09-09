@@ -57,7 +57,10 @@ session ends.
   am sw                     pick an account from a menu (↑/↓, Enter)
   am sw <id|name>           switch straight to it — no restart  (e.g. am sw claude2)
   am status                 what's active, rate limits, switch count
-  am usage [day|week|month|all]   tokens used, by account and by model
+  am usage [day|week|month|all]   tokens used, total per day (table)
+  am usage -D|--detail [-d|--date YYYY-MM-DD] [-p|--project NAME]
+                            breakdown by account/model/project/session;
+                            -d pins one day, -p filters one project
 
   am hook install|uninstall|status
   am proxy                  run the proxy in the foreground (normally automatic)

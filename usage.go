@@ -3,9 +3,11 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -53,7 +55,15 @@ func appendUsageEntry(e usageEntry) {
 // drained — without buffering the whole response before it reaches the
 // client, since ReverseProxy copies resp.Body to the client as it reads.
 func wrapUsageCapture(resp *http.Response, account string) {
+	debug := os.Getenv("AM_PROXY_DEBUG") != ""
 	if resp.Body == nil || resp.Request == nil || !strings.HasSuffix(resp.Request.URL.Path, "/v1/messages") {
+		if debug {
+			path := ""
+			if resp.Request != nil {
+				path = resp.Request.URL.Path
+			}
+			log.Printf("usage: skip capture, path=%q bodyNil=%v", path, resp.Body == nil)
+		}
 		return
 	}
 	pr, pw := io.Pipe()
@@ -74,10 +84,32 @@ func wrapUsageCapture(resp *http.Response, account string) {
 		session = resp.Request.Header.Get("X-Claude-Code-Session-Id")
 	}
 
+	gzipped := strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip")
 	go func() {
 		e := usageEntry{Time: time.Now(), Account: account, Project: project, Session: session}
-		parseUsageStream(pr, &e)
+		var src io.Reader = pr
+		if gzipped {
+			// Upstream sends gzip'd bodies (we forward the client's own
+			// Accept-Encoding as-is, so ReverseProxy's transport never
+			// auto-decompresses) — the tee is of the raw wire bytes since
+			// that's what must reach the client unmodified, so decode our
+			// own copy here before scanning for usage JSON.
+			if gr, err := gzip.NewReader(pr); err == nil {
+				defer gr.Close()
+				src = gr
+			} else {
+				src = nil
+			}
+		}
+		if src != nil {
+			parseUsageStream(src, &e)
+		} else {
+			_, _ = io.Copy(io.Discard, pr) // drain so the pipe doesn't block the response
+		}
 		_ = pr.CloseWithError(io.EOF)
+		if debug {
+			log.Printf("usage: parsed in=%d out=%d model=%q account=%q status=%d gzip=%v", e.Input, e.Output, e.Model, e.Account, resp.StatusCode, gzipped)
+		}
 		if e.Input > 0 || e.Output > 0 {
 			appendUsageEntry(e)
 		}
@@ -183,28 +215,134 @@ type usageAgg struct {
 	reqs    int
 }
 
+// cmdUsage: default output is one row per calendar day (a table), no
+// breakdown — `--detail` swaps that for the account/model/project/session
+// breakdown (still filtered to the period/date/project given). `--date`
+// pins the window to a single calendar day instead of day/week/month/all.
+// `--project` filters every mode down to one project.
 func cmdUsage(args []string) {
 	period := "week"
-	if len(args) > 0 {
-		period = args[0]
+	detail := false
+	var dateArg, projectFilter string
+	periodGiven := false
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; a {
+		case "--detail", "-D":
+			detail = true
+		case "--date", "-d":
+			i++
+			if i >= len(args) {
+				die("am usage: --date/-d needs a value (YYYY-MM-DD)")
+			}
+			dateArg = args[i]
+		case "--project", "-p":
+			i++
+			if i >= len(args) {
+				die("am usage: --project/-p needs a value")
+			}
+			projectFilter = args[i]
+		default:
+			if periodGiven || strings.HasPrefix(a, "-") {
+				die("am usage: [day|week|month|all] [-d|--date YYYY-MM-DD] [-p|--project NAME] [-D|--detail]")
+			}
+			period = a
+			periodGiven = true
+		}
 	}
-	var since time.Time
+
 	now := time.Now()
-	switch period {
-	case "day", "today":
-		y, m, d := now.Date()
-		since = time.Date(y, m, d, 0, 0, 0, 0, now.Location())
-	case "week":
-		since = now.AddDate(0, 0, -7)
-	case "month":
-		since = now.AddDate(0, -1, 0)
-	case "all":
-		since = time.Time{}
-	default:
-		die("am usage: [day|week|month|all]")
+	var since time.Time
+	var dateOnly time.Time // zero unless --date pins a single day
+	if dateArg != "" {
+		d, err := time.ParseInLocation("2006-01-02", dateArg, now.Location())
+		if err != nil {
+			die("am usage: --date %q: want YYYY-MM-DD", dateArg)
+		}
+		dateOnly = d
+		since = d
+	} else {
+		switch period {
+		case "day", "today":
+			y, m, d := now.Date()
+			since = time.Date(y, m, d, 0, 0, 0, 0, now.Location())
+		case "week":
+			since = now.AddDate(0, 0, -7)
+		case "month":
+			since = now.AddDate(0, -1, 0)
+		case "all":
+			since = time.Time{}
+		default:
+			die("am usage: [day|week|month|all] [--date YYYY-MM-DD] [--project NAME] [--detail]")
+		}
 	}
 
 	entries := loadUsageEntries()
+	var filtered []usageEntry
+	for _, e := range entries {
+		if !since.IsZero() && e.Time.Before(since) {
+			continue
+		}
+		if !dateOnly.IsZero() && e.Time.After(dateOnly.AddDate(0, 0, 1)) {
+			continue
+		}
+		if projectFilter != "" && projectLabel(e.Project) != projectFilter {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+
+	label := period
+	if !dateOnly.IsZero() {
+		label = dateOnly.Format("2006-01-02")
+	} else if !since.IsZero() {
+		label = fmt.Sprintf("%s (since %s)", period, since.Local().Format("2006-01-02 15:04"))
+	}
+	if projectFilter != "" {
+		label += "  project=" + projectFilter
+	}
+	fmt.Printf("token usage — %s\n\n", label)
+	if len(filtered) == 0 {
+		fmt.Println("no requests logged in this window (see ~/.am/usage.log)")
+		return
+	}
+
+	if detail {
+		printUsageDetail(filtered)
+		return
+	}
+	printUsageByDay(filtered)
+}
+
+// printUsageByDay is the default view: one row per calendar day, oldest
+// first, plus a total row — enough to see the trend at a glance.
+func printUsageByDay(entries []usageEntry) {
+	byDay := map[string]*usageAgg{}
+	var totalIn, totalOut, totalReqs int
+	for _, e := range entries {
+		bump(byDay, e.Time.Local().Format("2006-01-02"), e)
+		totalIn += e.Input
+		totalOut += e.Output
+		totalReqs++
+	}
+	days := make([]string, 0, len(byDay))
+	for d := range byDay {
+		days = append(days, d)
+	}
+	sort.Strings(days)
+
+	fmt.Printf("%-12s  %12s  %12s  %8s\n", "date", "in", "out", "req")
+	fmt.Println(strings.Repeat("-", 48))
+	for _, d := range days {
+		a := byDay[d]
+		fmt.Printf("%-12s  %12s  %12s  %8d\n", d, commas(a.in), commas(a.out), a.reqs)
+	}
+	fmt.Println(strings.Repeat("-", 48))
+	fmt.Printf("%-12s  %12s  %12s  %8d\n", "total", commas(totalIn), commas(totalOut), totalReqs)
+}
+
+// printUsageDetail is the --detail view: the account/model/project/session
+// breakdown, same shape `am usage` always printed before this flag existed.
+func printUsageDetail(entries []usageEntry) {
 	byAccount := map[string]*usageAgg{}
 	byModel := map[string]*usageAgg{}
 	byProject := map[string]*usageAgg{}
@@ -212,9 +350,6 @@ func cmdUsage(args []string) {
 	lastSeen := map[string]time.Time{}
 	var totalIn, totalOut, totalReqs int
 	for _, e := range entries {
-		if !since.IsZero() && e.Time.Before(since) {
-			continue
-		}
 		bump(byAccount, e.Account, e)
 		bump(byModel, orDash(e.Model), e)
 		bump(byProject, projectLabel(e.Project), e)
@@ -226,16 +361,6 @@ func cmdUsage(args []string) {
 		totalIn += e.Input
 		totalOut += e.Output
 		totalReqs++
-	}
-
-	label := period
-	if !since.IsZero() {
-		label = fmt.Sprintf("%s (since %s)", period, since.Local().Format("2006-01-02 15:04"))
-	}
-	fmt.Printf("token usage — %s\n\n", label)
-	if totalReqs == 0 {
-		fmt.Println("no requests logged in this window (see ~/.am/usage.log)")
-		return
 	}
 
 	fmt.Println("by account:")

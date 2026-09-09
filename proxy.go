@@ -222,6 +222,13 @@ type rotator struct {
 	dead       map[string]bool // profile name -> refresh token confirmed dead; skip in rotate() until re-login
 	switches   int
 	lastSwitch time.Time
+
+	// Per-account switch tallies, split by who initiated it — `am status`
+	// shows these so "why did it leave this account" is answerable without
+	// grepping proxy.log. Keyed by the account switched AWAY FROM (the one
+	// that stopped being usable at that moment).
+	autoSwitches   map[string]int // rotate(): 429 or near-limit
+	manualSwitches map[string]int // forceSwitch(): `am switch` / hook-driven
 }
 
 type token struct {
@@ -259,6 +266,8 @@ func (r *rotator) load() {
 	r.accounts = map[string]string{}
 	r.cooldown = map[string]time.Time{}
 	r.dead = map[string]bool{}
+	r.autoSwitches = map[string]int{}
+	r.manualSwitches = map[string]int{}
 	for _, p := range listProfiles(r.tool) {
 		r.order = append(r.order, p.Name)
 		r.tokens[p.Name] = loadClaudeToken(r.tool, p.Name)
@@ -522,6 +531,7 @@ func (r *rotator) rotate(from, reason string) {
 		}
 		r.idx = (r.idx + step) % n
 		r.switches++
+		r.autoSwitches[from]++
 		r.lastSwitch = time.Now()
 		writeActivePointer(r.tool, cand)
 		log.Printf("ROTATE (%s): %s -> %s", reason, from, cand)
@@ -537,6 +547,7 @@ func (r *rotator) forceSwitch(name string) error {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	from := r.order[r.idx]
 	if name == "" {
 		r.idx = (r.idx + 1) % len(r.order)
 	} else {
@@ -555,6 +566,9 @@ func (r *rotator) forceSwitch(name string) error {
 	delete(r.cooldown, target) // manual switch clears any cooldown on the target
 	delete(r.dead, target)     // ...and any dead-refresh blacklist; user is vouching for it
 	r.switches++
+	if target != from {
+		r.manualSwitches[from]++
+	}
 	r.lastSwitch = time.Now()
 	writeActivePointer(r.tool, target)
 	if !installActiveProfile(target) {
@@ -572,9 +586,11 @@ func (r *rotator) status() map[string]any {
 	for _, n := range r.order {
 		t := r.tokens[n]
 		m := map[string]any{
-			"profile": n,
-			"account": r.accounts[n],
-			"active":  n == r.order[r.idx],
+			"profile":         n,
+			"account":         r.accounts[n],
+			"active":          n == r.order[r.idx],
+			"auto_switches":   r.autoSwitches[n],
+			"manual_switches": r.manualSwitches[n],
 		}
 		if t != nil {
 			m["remaining"] = t.remaining
@@ -646,9 +662,17 @@ const defaultUpstream = "https://api.anthropic.com"
 // cmdStatus queries a running proxy and prints per-account limit info — the
 // same data `/usage` in Claude Code would show for the currently active
 // account, since the proxy serves that account's token to every request.
+// dotGreen/dotGray color the status dot so "running" reads at a glance
+// instead of blending into the rest of the line — grey (not red) for "not
+// running" since that's the normal idle state, not an error.
+const (
+	dotGreen = "\x1b[32m●\x1b[0m"
+	dotGray  = "\x1b[90m○\x1b[0m"
+)
+
 func cmdStatus() {
 	if !proxyUp() {
-		fmt.Println("proxy:     ○ not running (starts automatically when you launch claude, stays up until `am proxy down --force`)")
+		fmt.Printf("proxy:     %s not running (starts automatically when you launch claude, stays up until `am proxy down --force`)\n", dotGray)
 		fmt.Printf("base URL:  %s  (direct — no rotation, no auto-switch on rate limit)\n\n", defaultUpstream)
 		printLiveLogins()
 		return
@@ -664,23 +688,25 @@ func cmdStatus() {
 		Sessions int    `json:"sessions"`
 		Upstream string `json:"upstream"`
 		Accounts []struct {
-			Profile     string   `json:"profile"`
-			Account     string   `json:"account"`
-			Active      bool     `json:"active"`
-			Remaining   float64  `json:"remaining"`
-			LimitReset  string   `json:"limit_reset"`
-			Cooldown    string   `json:"cooldown_until"`
-			Dead        bool     `json:"dead"`
-			FiveHUsed   *float64 `json:"5h_used"`
-			FiveHReset  string   `json:"5h_reset"`
-			SevenDUsed  *float64 `json:"7d_used"`
-			SevenDReset string   `json:"7d_reset"`
+			Profile        string   `json:"profile"`
+			Account        string   `json:"account"`
+			Active         bool     `json:"active"`
+			Remaining      float64  `json:"remaining"`
+			LimitReset     string   `json:"limit_reset"`
+			Cooldown       string   `json:"cooldown_until"`
+			Dead           bool     `json:"dead"`
+			FiveHUsed      *float64 `json:"5h_used"`
+			FiveHReset     string   `json:"5h_reset"`
+			SevenDUsed     *float64 `json:"7d_used"`
+			SevenDReset    string   `json:"7d_reset"`
+			AutoSwitches   int      `json:"auto_switches"`
+			ManualSwitches int      `json:"manual_switches"`
 		} `json:"accounts"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
 		die("status decode: %v", err)
 	}
-	fmt.Printf("proxy:     ● running on %s · %d claude tab(s) attached · %d switch(es) this run\n", proxyAddr(), s.Sessions, s.Switches)
+	fmt.Printf("proxy:     %s running on %s · %d claude tab(s) attached · %d switch(es) this run\n", dotGreen, proxyAddr(), s.Sessions, s.Switches)
 	fmt.Printf("base URL:  %s  (rotating through %d account(s) below)\n\n", proxyBase(), len(s.Accounts))
 	for _, a := range s.Accounts {
 		mark := "  "
@@ -711,6 +737,9 @@ func cmdStatus() {
 		}
 		if a.SevenDUsed != nil {
 			fmt.Printf("           7d limit:  %.0f%% used%s\n", *a.SevenDUsed*100, resetSuffix(a.SevenDReset))
+		}
+		if a.AutoSwitches > 0 || a.ManualSwitches > 0 {
+			fmt.Printf("           switched away: %d auto (429/near-limit), %d manual\n", a.AutoSwitches, a.ManualSwitches)
 		}
 		if a.FiveHUsed == nil && a.SevenDUsed == nil && a.Remaining >= 0 {
 			// Older/plain response only — no per-window breakdown available yet.
