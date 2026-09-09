@@ -24,8 +24,11 @@ func proxyAddr() string { return envOr("AM_PROXY_ADDR", defaultAddr) }
 func proxyBase() string { return "http://" + proxyAddr() }
 
 // cmdProxy dispatches: `am proxy` runs the reverse proxy in the foreground;
-// `am proxy up` / `am proxy down` are what the Claude Code hooks call to start
-// it on demand and stop it when the last session ends.
+// `am proxy up` is what the Claude Code SessionStart hook calls to start it
+// on demand; `am proxy down` (SessionEnd) just deregisters the session for
+// `am status`'s count — it no longer stops the server, so
+// ANTHROPIC_BASE_URL=127.0.0.1:8787 is never left pointing at a dead
+// listener mid-session. Use `am proxy down --force` to actually stop it.
 func cmdProxy(args []string) {
 	if len(args) > 0 {
 		switch args[0] {
@@ -33,15 +36,20 @@ func cmdProxy(args []string) {
 			proxyEnsureUp()
 			return
 		case "down":
-			proxyReleaseAndMaybeStop()
+			if len(args) > 1 && args[1] == "--force" {
+				proxyForceStop()
+			} else {
+				proxyReleaseAndMaybeStop()
+			}
 			return
 		}
 	}
 	runProxyForeground(args)
 }
 
-// runProxyForeground is the actual server. It exits on its own once no Claude
-// session has held it for idleShutdown, so it never lingers after `claude`.
+// runProxyForeground is the actual server. It runs indefinitely — stop it
+// with `am proxy down --force` — so it never disappears out from under a
+// claude session that's still pointed at it.
 func runProxyForeground(args []string) {
 	addr := defaultAddr
 	upstream := "https://api.anthropic.com"
@@ -69,12 +77,10 @@ func runProxyForeground(args []string) {
 	go rot.periodicSnapshot()
 
 	life := &lifecycle{}
-	life.touch()
 
 	target, _ := url.Parse(upstream)
 	rp := &httputil.ReverseProxy{
 		Director: func(r *http.Request) {
-			life.touch()
 			r.URL.Scheme = target.Scheme
 			r.URL.Host = target.Host
 			r.Host = target.Host
@@ -97,7 +103,10 @@ func runProxyForeground(args []string) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/_am/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(rot.status())
+		s := rot.status()
+		s["sessions"] = life.sessions()
+		s["upstream"] = upstream
+		_ = json.NewEncoder(w).Encode(s)
 	})
 	mux.HandleFunc("/_am/switch", func(w http.ResponseWriter, r *http.Request) {
 		if err := rot.forceSwitch(r.URL.Query().Get("to")); err != nil {
@@ -106,14 +115,17 @@ func runProxyForeground(args []string) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"active": rot.active()})
 	})
-	// Hooks register/deregister a session; the proxy shuts down shortly after
-	// the count hits zero (grace period covers a quick claude restart).
+	// Hooks register/deregister a session by the claude process's PID —
+	// tracked only so `am status` can show how many tabs are attached.
 	mux.HandleFunc("/_am/session", func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Query().Get("op") {
-		case "start":
-			life.addSession()
-		case "end":
-			life.endSession()
+		pid, _ := strconv.Atoi(r.URL.Query().Get("pid"))
+		if pid > 0 {
+			switch r.URL.Query().Get("op") {
+			case "start":
+				life.addSession(pid)
+			case "end":
+				life.endSession(pid)
+			}
 		}
 		fmt.Fprintf(w, "%d\n", life.sessions())
 	})
@@ -128,7 +140,10 @@ func runProxyForeground(args []string) {
 	})
 
 	srv := &http.Server{Addr: addr, Handler: withProxy(mux, rp)}
-	go life.watch(srv)
+	mux.HandleFunc("/_am/shutdown", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "ok")
+		go func() { time.Sleep(100 * time.Millisecond); _ = srv.Close() }()
+	})
 
 	_ = os.MkdirAll(baseDir(), 0o700)
 	log.Printf("am proxy up on %s, account %q", addr, rot.active())
@@ -148,66 +163,44 @@ func withProxy(mux *http.ServeMux, rp http.Handler) http.Handler {
 	})
 }
 
-// lifecycle tracks active Claude sessions and the last request time so the
-// proxy can exit when nothing needs it.
+// lifecycle tracks active Claude sessions by PID for `am status` to report
+// ("N claude tab(s) attached"). It no longer decides whether the proxy stays
+// up — the proxy now runs indefinitely once started (see runProxyForeground)
+// so ANTHROPIC_BASE_URL pointing at 127.0.0.1:8787 is never left dangling
+// with nothing listening: it was mid-session auto-shutdown that caused that,
+// not a one-time startup failure. Stop it explicitly with `am proxy down --force`.
 type lifecycle struct {
-	mu       sync.Mutex
-	nSess    int
-	lastSeen time.Time
+	mu   sync.Mutex
+	pids map[int]bool
 }
 
-const (
-	// With no session registered, stop soon after the last request (the grace
-	// covers a quick `claude` restart between SessionEnd and SessionStart).
-	zeroGrace = 30 * time.Second
-	// With a session still registered, only stop if it has made no request for
-	// a long time — that means the `claude` process died without its
-	// SessionEnd hook firing, so the count is stuck. A live but idle tab
-	// (open, not being used) keeps the proxy up.
-	zombieTimeout = 30 * time.Minute
-)
-
-func (l *lifecycle) touch()      { l.mu.Lock(); l.lastSeen = time.Now(); l.mu.Unlock() }
-func (l *lifecycle) addSession() { l.mu.Lock(); l.nSess++; l.lastSeen = time.Now(); l.mu.Unlock() }
-func (l *lifecycle) endSession() {
+func (l *lifecycle) addSession(pid int) {
 	l.mu.Lock()
-	if l.nSess > 0 {
-		l.nSess--
+	if l.pids == nil {
+		l.pids = map[int]bool{}
 	}
-	l.lastSeen = time.Now()
+	l.pids[pid] = true
 	l.mu.Unlock()
 }
-func (l *lifecycle) sessions() int { l.mu.Lock(); defer l.mu.Unlock(); return l.nSess }
+func (l *lifecycle) endSession(pid int) {
+	l.mu.Lock()
+	delete(l.pids, pid)
+	l.mu.Unlock()
+}
+func (l *lifecycle) sessions() int { return l.pruneDead() }
 
-func (l *lifecycle) watch(srv *http.Server) {
-	tick := time.NewTicker(5 * time.Second)
-	defer tick.Stop()
-	zeroSince := time.Time{}
-	for range tick.C {
-		l.mu.Lock()
-		n, idle := l.nSess, time.Since(l.lastSeen)
-		l.mu.Unlock()
-
-		if n == 0 {
-			// no claude session — stop shortly after the last request
-			if zeroSince.IsZero() {
-				zeroSince = time.Now()
-			}
-			if time.Since(zeroSince) > zeroGrace {
-				_ = srv.Close()
-				return
-			}
-		} else {
-			zeroSince = time.Time{}
-			// a session is registered — keep running even when idle, unless
-			// it's been silent long enough to be a crashed (zombie) session
-			if idle > zombieTimeout {
-				log.Printf("session(s) registered but silent %s — assuming crashed, stopping", idle.Round(time.Minute))
-				_ = srv.Close()
-				return
-			}
+// pruneDead drops any tracked PID that's no longer alive (process crashed
+// without its SessionEnd hook firing) and returns how many remain. Only
+// affects the count `am status` shows — never shuts the proxy down.
+func (l *lifecycle) pruneDead() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for pid := range l.pids {
+		if err := syscall.Kill(pid, 0); err != nil {
+			delete(l.pids, pid)
 		}
 	}
+	return len(l.pids)
 }
 
 // rotator holds the in-memory token state for the proxy.
@@ -591,12 +584,15 @@ func parseFirstTime(h http.Header, keys ...string) time.Time {
 	return time.Time{}
 }
 
+const defaultUpstream = "https://api.anthropic.com"
+
 // cmdStatus queries a running proxy and prints per-account limit info — the
 // same data `/usage` in Claude Code would show for the currently active
 // account, since the proxy serves that account's token to every request.
 func cmdStatus() {
 	if !proxyUp() {
-		fmt.Print("proxy not running (it starts automatically when you launch claude)\n\n")
+		fmt.Println("proxy:     ○ not running (starts automatically when you launch claude, stays up until `am proxy down --force`)")
+		fmt.Printf("base URL:  %s  (direct — no rotation, no auto-switch on rate limit)\n\n", defaultUpstream)
 		printLiveLogins()
 		return
 	}
@@ -608,6 +604,8 @@ func cmdStatus() {
 	var s struct {
 		Tool     string `json:"tool"`
 		Switches int    `json:"switches"`
+		Sessions int    `json:"sessions"`
+		Upstream string `json:"upstream"`
 		Accounts []struct {
 			Profile    string  `json:"profile"`
 			Account    string  `json:"account"`
@@ -621,13 +619,23 @@ func cmdStatus() {
 	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
 		die("status decode: %v", err)
 	}
-	fmt.Printf("proxy up · %d switch(es) this run\n\n", s.Switches)
+	fmt.Printf("proxy:     ● running on %s · %d claude tab(s) attached · %d switch(es) this run\n", proxyAddr(), s.Sessions, s.Switches)
+	fmt.Printf("base URL:  %s  (rotating through %d account(s) below)\n\n", proxyBase(), len(s.Accounts))
 	for _, a := range s.Accounts {
 		mark := "  "
+		state := "idle"
 		if a.Active {
 			mark = "> "
+			state = "active"
 		}
-		line := fmt.Sprintf("%s%s", mark, orDash(a.Account))
+		if a.Dead {
+			state = "dead"
+		} else if a.Cooldown != "" {
+			if t, e := time.Parse(time.RFC3339, a.Cooldown); e == nil && time.Now().Before(t) {
+				state = "cooldown"
+			}
+		}
+		line := fmt.Sprintf("%s%-8s  %s", mark, state, orDash(a.Account))
 		if a.Remaining >= 0 {
 			line += fmt.Sprintf("   %.0f%% left", a.Remaining*100)
 		}
@@ -697,15 +705,38 @@ func proxyEnsureUp() {
 		}
 	}
 	_, _ = http.Post(proxyBase()+"/_am/sync", "", nil)
-	_, _ = http.Post(proxyBase()+"/_am/session?op=start", "", nil)
+	// The hook process is a direct child of `claude`, so its parent PID is
+	// the claude process this session belongs to — that's what the proxy
+	// tracks liveness by.
+	_, _ = http.Post(proxyBase()+"/_am/session?op=start&pid="+strconv.Itoa(os.Getppid()), "", nil)
 }
 
-// proxyReleaseAndMaybeStop deregisters a session; the proxy stops itself once
-// the count reaches zero. Called by the SessionEnd hook.
+// proxyReleaseAndMaybeStop deregisters a session for `am status`'s count.
+// Called by the SessionEnd hook. The name is legacy — it no longer stops
+// anything; the proxy stays up so a still-live tab is never left pointed at
+// a dead port.
 func proxyReleaseAndMaybeStop() {
 	if proxyUp() {
-		_, _ = http.Post(proxyBase()+"/_am/session?op=end", "", nil)
+		_, _ = http.Post(proxyBase()+"/_am/session?op=end&pid="+strconv.Itoa(os.Getppid()), "", nil)
 	}
+}
+
+// proxyForceStop actually shuts the background proxy down. `am status`
+// afterwards will show the base URL falling back to the real Anthropic API.
+func proxyForceStop() {
+	if !proxyUp() {
+		fmt.Println("proxy not running")
+		return
+	}
+	resp, err := http.Post(proxyBase()+"/_am/shutdown", "", nil)
+	if err != nil {
+		die("shutdown request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		die("shutdown request returned %s (binary running may be stale — rebuild/reinstall am)", resp.Status)
+	}
+	fmt.Println("proxy stopped")
 }
 
 func spawnProxy() {

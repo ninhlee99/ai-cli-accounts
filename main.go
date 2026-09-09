@@ -124,6 +124,8 @@ func main() {
 		cmdHook(args[1:])
 	case "proxy":
 		cmdProxy(args[1:])
+	case "env":
+		cmdEnv(args[1:])
 	case "export":
 		cmdExport(args[1:])
 	case "import":

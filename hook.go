@@ -8,15 +8,17 @@ import (
 	"strings"
 )
 
-// The proxy is started and stopped by Claude Code lifecycle hooks so it only
-// runs while `claude` is running. `am hook install` wires:
+// The proxy is started on demand by a Claude Code lifecycle hook and then
+// runs indefinitely (see runProxyForeground) so a still-open tab is never
+// left pointed at a dead port. `am hook install` wires:
 //
 //   SessionStart -> am proxy up     (spawn if needed, register the session)
-//   SessionEnd   -> am proxy down   (deregister; proxy self-stops at zero)
+//   SessionEnd   -> am proxy down   (deregister; just updates `am status`'s count)
 //
 // It also needs ANTHROPIC_BASE_URL to point `claude` at the proxy. Hooks can't
-// set session env, so that one line still goes in the shell rc — `am hook
-// install` prints it and offers to append it.
+// set session env, so `am hook install` offers to append one line to the
+// shell rc: `eval "$(am env)"`, which resolves ANTHROPIC_BASE_URL (and any
+// vars from `am env set`) fresh in every new shell — see env.go.
 
 func claudeSettingsPath() string {
 	home, _ := os.UserHomeDir()
@@ -149,12 +151,14 @@ func hookInstall() {
 
 	fmt.Printf("installed hooks in %s\n  SessionStart -> am proxy up\n  SessionEnd   -> am proxy down\n\n", claudeSettingsPath())
 
-	line := "export ANTHROPIC_BASE_URL=" + proxyBase()
-	if os.Getenv("ANTHROPIC_BASE_URL") == proxyBase() {
-		fmt.Println("ANTHROPIC_BASE_URL already points at the proxy — done.")
+	// `am env` resolves ANTHROPIC_BASE_URL dynamically (always the proxy),
+	// so the rc line never goes stale even if the proxy's addr ever changes.
+	line := `eval "$(am env)"`
+	rc := shellRC()
+	if rc != "" && rcHasLine(rc, line) {
+		fmt.Println("shell rc already wired to `am env` — done.")
 		return
 	}
-	rc := shellRC()
 	if rc != "" && !rcHasLine(rc, line) {
 		fmt.Printf("add this to %s (once):\n  %s\n", rc, line)
 		fmt.Print("append it now? [y/N] ")
@@ -174,7 +178,7 @@ func hookUninstall() {
 	n := removeOurHooks(m)
 	saveClaudeSettings(m)
 	fmt.Printf("removed %d hook entr%s from %s\n", n, plural(n, "y", "ies"), claudeSettingsPath())
-	fmt.Printf("also remove the ANTHROPIC_BASE_URL line from your shell rc if you added it.\n")
+	fmt.Printf("also remove the `eval \"$(am env)\"` line from your shell rc if you added it.\n")
 }
 
 func hookStatus() {
@@ -193,11 +197,12 @@ func hookStatus() {
 	if !found {
 		fmt.Println("hooks: not installed  (am hook install)")
 	}
-	if os.Getenv("ANTHROPIC_BASE_URL") == proxyBase() {
+	switch os.Getenv("ANTHROPIC_BASE_URL") {
+	case proxyBase():
 		fmt.Printf("ANTHROPIC_BASE_URL: %s\n", proxyBase())
-	} else if os.Getenv("ANTHROPIC_BASE_URL") == "" {
-		fmt.Println("ANTHROPIC_BASE_URL: not set — claude will bypass the proxy")
-	} else {
+	case "":
+		fmt.Println("ANTHROPIC_BASE_URL: not set — claude will bypass the proxy (run `am hook install` to wire `am env`)")
+	default:
 		fmt.Printf("ANTHROPIC_BASE_URL: %s  (not the proxy)\n", os.Getenv("ANTHROPIC_BASE_URL"))
 	}
 	if proxyUp() {
