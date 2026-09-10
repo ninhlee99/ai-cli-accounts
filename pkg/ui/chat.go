@@ -18,12 +18,11 @@ import (
 func CmdChat(args []string) {
 	providerID, args := extractProviderFlag(args)
 
-	// LoadAccounts always includes at least the auto-surfaced, no-auth
-	// DuckDuckGo fallback (see duckduckgoFallbackAdapter) unless the user
-	// explicitly opted out, so no separate empty-pool fallback is needed
-	// here.
 	adapters, _ := provider.LoadAccounts(provider.DefaultAccountsPath())
-
+	if len(adapters) == 0 {
+		fmt.Println("No providers in pool. Run `am login chatgpt` or `am login gemini` (or add an API key).")
+		return
+	}
 	if providerID != "" {
 		var match types.ProviderAdapter
 		var ids []string
@@ -97,7 +96,15 @@ func runChatTurn(pool *router.AccountPoolRouter, history *[]types.ChatMessage, p
 	ctx := context.Background()
 	ch, err := pool.Send(ctx, req)
 	if err != nil {
+		if strings.Contains(err.Error(), "rate limit") {
+			fmt.Printf("\n[Rate limit — Claude free/web giới hạn tin nhắn. Đợi 1–2 phút hoặc dùng geminiapi / Pro.]\n")
+			fmt.Printf("[%v]\n", err)
+			// Drop the user turn so retrying the same question doesn't stack history.
+			*history = (*history)[:len(*history)-1]
+			return
+		}
 		fmt.Printf("\n[Error: %v]\n", err)
+		*history = (*history)[:len(*history)-1]
 		return
 	}
 

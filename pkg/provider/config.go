@@ -14,7 +14,7 @@ import (
 
 type ProviderConfig struct {
 	ID       string `json:"id"`
-	Type     string `json:"type"` // "openai_compatible" | "duckduckgo" | "chatgpt_web" | "claude_web" | "gemini"
+	Type     string `json:"type"` // "openai_compatible" | "chatgpt_web" | "claude_web" | "gemini"
 	Priority int    `json:"priority"`
 	Enabled  *bool  `json:"enabled,omitempty"`
 
@@ -25,12 +25,22 @@ type ProviderConfig struct {
 
 	// chatgpt_web
 	SessionToken string `json:"sessionToken,omitempty"`
+	RefreshToken string `json:"refreshToken,omitempty"`
 
 	// claude_web
 	SessionKey string `json:"sessionKey,omitempty"`
 
-	// gemini_web
+	// gemini_web / optional raw Cookie header
 	Cookies string `json:"cookies,omitempty"`
+
+	// Claude web: reuse one chat_conversations UUID across am chat / proxy
+	// restarts until rate-limit or 404 forces a new thread.
+	OrgID          string `json:"orgId,omitempty"`
+	ConversationID string `json:"conversationId,omitempty"`
+	// ChatGPT web: last assistant message id (next turn's parent_message_id).
+	ParentMessageID string `json:"parentMessageId,omitempty"`
+	// Gemini web: JSON array of chat.metadata (cid/rid/rcid/…).
+	MetadataJSON string `json:"metadataJson,omitempty"`
 }
 
 // IsConfigured reports whether the provider has valid credentials / configuration.
@@ -45,11 +55,8 @@ func (p ProviderConfig) IsConfigured() bool {
 		return ResolveSecret(p.SessionToken) != ""
 	case "claude_web":
 		return ResolveSecret(p.SessionKey) != ""
-	case "duckduckgo":
-		if p.Enabled != nil {
-			return *p.Enabled
-		}
-		return false
+	case "gemini_web":
+		return strings.TrimSpace(p.Cookies) != "" || ResolveSecret(p.SessionKey) != ""
 	}
 	return false
 }
@@ -82,6 +89,7 @@ var poolIDPrefix = map[string]string{
 	"claude_web":  "claudeweb",
 	"chatgpt_web": "chatgptweb",
 	"gemini":      "geminiapi",
+	"gemini_web":  "geminiweb",
 }
 
 // PoolIDPrefix returns the unified-ID prefix for a built-in pool provider
@@ -161,21 +169,10 @@ func SetPriority(path, id string, priority int) error {
 		return SaveConfigFile(path, f)
 	}
 
-	// Same idea for the auto-surfaced DuckDuckGo fallback (duckduckgoFallbackAdapter):
-	// it has no accounts.json row of its own either, so give it one on first use.
-	if id == "duckduckgo" {
-		f.Providers = append(f.Providers, ProviderConfig{ID: "duckduckgo", Type: "duckduckgo", Enabled: boolPtr(true), Priority: priority})
-		return SaveConfigFile(path, f)
-	}
-
 	return fmt.Errorf("no provider with id %q in pool (see: am accounts)", id)
 }
 
 // SetModel updates the target model of one provider by ID and persists it.
-// If id is "duckduckgo" and no row exists yet (the auto-surfaced fallback,
-// see duckduckgoFallbackAdapter, has none), a row is inserted instead of
-// erroring, so its model can be overridden without ever hand-editing
-// accounts.json.
 func SetModel(path, id, model string) error {
 	f, err := LoadConfigFile(path)
 	if err != nil && !os.IsNotExist(err) {
@@ -192,15 +189,8 @@ func SetModel(path, id, model string) error {
 		}
 	}
 
-	if id == "duckduckgo" {
-		f.Providers = append(f.Providers, ProviderConfig{ID: "duckduckgo", Type: "duckduckgo", Enabled: boolPtr(true), Priority: duckduckgoFallbackPriority, Model: model})
-		return SaveConfigFile(path, f)
-	}
-
 	return fmt.Errorf("no provider with id %q in pool (see: am accounts)", id)
 }
-
-func boolPtr(b bool) *bool { return &b }
 
 func ResolveSecret(val string) string {
 	if strings.HasPrefix(val, "env:") {
@@ -230,27 +220,18 @@ func BuildAdapter(p ProviderConfig) (types.ProviderAdapter, error) {
 	case "gemini":
 		model := p.Model
 		if model == "" {
-			model = "gemini-2.0-flash"
+			model = "gemini-3.6-flash"
 		}
 		return NewGeminiAdapter(p.ID, p.Priority, ResolveSecret(p.APIKey), model), nil
 
-	case "duckduckgo":
-		model := p.Model
-		if model == "" {
-			model = "claude-3-haiku-20240307"
-		}
-		return &DuckDuckGoAdapter{
-			AdapterID:   p.ID,
-			PriorityLvl: p.Priority,
-			TargetModel: model,
-		}, nil
-
 	case "chatgpt_web":
 		return &ChatGPTWebAdapter{
-			AdapterID:    p.ID,
-			PriorityLvl:  p.Priority,
-			SessionToken: ResolveSecret(p.SessionToken),
-			TargetModel:  p.Model,
+			AdapterID:       p.ID,
+			PriorityLvl:     p.Priority,
+			SessionToken:    ResolveSecret(p.SessionToken),
+			TargetModel:     p.Model,
+			convID:          p.ConversationID,
+			parentMessageID: p.ParentMessageID,
 		}, nil
 
 	case "claude_web":
@@ -258,7 +239,25 @@ func BuildAdapter(p ProviderConfig) (types.ProviderAdapter, error) {
 			AdapterID:   p.ID,
 			PriorityLvl: p.Priority,
 			SessionKey:  ResolveSecret(p.SessionKey),
+			Cookies:     p.Cookies,
 			TargetModel: p.Model,
+			orgID:       p.OrgID,
+			convUUID:    p.ConversationID,
+		}, nil
+
+	case "gemini_web":
+		sk := ResolveSecret(p.SessionKey)
+		cookies := p.Cookies
+		if cookies == "" && sk != "" {
+			cookies = "__Secure-1PSID=" + sk
+		}
+		return &GeminiWebAdapter{
+			AdapterID:   p.ID,
+			PriorityLvl: p.Priority,
+			Cookies:     cookies,
+			TargetModel: p.Model,
+			cid:         p.ConversationID,
+			metadataJSON: p.MetadataJSON,
 		}, nil
 
 	default:
@@ -300,41 +299,23 @@ func LoadAccounts(path string) ([]types.ProviderAdapter, error) {
 		adapters = append(adapters, a)
 	}
 
-	// 3. Auto-surface a free, no-auth DuckDuckGo adapter as the pool's last
-	// resort, so once every real account above is in cooldown (rate limit)
-	// or failing, the router still has somewhere to fall over to instead of
-	// erroring out. See duckduckgoFallbackAdapter.
-	if a := duckduckgoFallbackAdapter(providers); a != nil {
-		adapters = append(adapters, a)
-	}
-
 	return adapters, nil
 }
 
-// duckduckgoFallbackPriority is deliberately higher (tried later, per the
-// router's ascending-priority order — pkg/router/pool.go) than every other
-// adapter's typical priority (1-10), so DuckDuckGo only gets used once
-// every real account is in cooldown or failing.
-const duckduckgoFallbackPriority = 100
-
-// duckduckgoFallbackAdapter auto-surfaces the free, no-auth DuckDuckGo
-// adapter as the pool's last resort, mirroring codexPoolAdapter: no
-// explicit accounts.json entry is required. If the user already has a
-// "duckduckgo"-typed row of their own (enabled or explicitly disabled),
-// that row is handled by the main BuildAdapter loop above (or is an
-// explicit opt-out) and this returns nil to avoid a duplicate adapter ID.
-func duckduckgoFallbackAdapter(providers []ProviderConfig) types.ProviderAdapter {
-	for _, p := range providers {
-		if p.Type == "duckduckgo" {
-			return nil
-		}
-	}
-	return &DuckDuckGoAdapter{
-		AdapterID:   "duckduckgo",
-		TargetModel: "GPT-5.6 Luma",
-		PriorityLvl: duckduckgoFallbackPriority,
-	}
-}
+// Pool priority bands (lower = tried first by AccountPoolRouter):
+//
+//	API keys / OpenAI-compatible  ……  1–19
+//	Web sessions (ChatGPT/Claude/Codex)  20–49
+const (
+	PriorityAPIGitHub  = 1
+	PriorityAPIGemini  = 2
+	PriorityAPIGroq    = 3
+	PriorityAPICustom  = 10
+	PriorityWebChatGPT = 20
+	PriorityWebGemini  = 22
+	PriorityWebClaude  = 25
+	PriorityWebCodex   = 30
+)
 
 // codexPoolAdapter builds the Codex CLI token-reuse adapter if a live
 // ~/.codex/auth.json is present. providers is accounts.json's current
@@ -346,7 +327,7 @@ func codexPoolAdapter(providers []ProviderConfig) types.ProviderAdapter {
 		return nil
 	}
 
-	priority := 6 // same default tier claude-web used to occupy
+	priority := PriorityWebCodex // web-session tier; after API keys
 	for i := range providers {
 		if providers[i].Type != "codex_cli" {
 			continue
@@ -373,19 +354,6 @@ func CodexAutoRow(providers []ProviderConfig) (ProviderConfig, bool) {
 		return ProviderConfig{}, false
 	}
 	return ProviderConfig{ID: a.AdapterID, Type: "codex_cli", Priority: a.PriorityLvl}, true
-}
-
-// DuckDuckGoAutoRow returns a synthetic display row for the auto-surfaced
-// DuckDuckGo fallback adapter (see duckduckgoFallbackAdapter), for callers
-// like `am accounts` that want to show it even though it has no real entry
-// in accounts.json. ok is false when the user already has a "duckduckgo"-
-// typed row of their own (enabled or an explicit opt-out).
-func DuckDuckGoAutoRow(providers []ProviderConfig) (ProviderConfig, bool) {
-	a, ok := duckduckgoFallbackAdapter(providers).(*DuckDuckGoAdapter)
-	if !ok || a == nil {
-		return ProviderConfig{}, false
-	}
-	return ProviderConfig{ID: a.AdapterID, Type: "duckduckgo", Priority: a.PriorityLvl, Model: a.TargetModel, Enabled: boolPtr(true)}, true
 }
 
 // codexPoolID resolves the unified ID of the currently active codex
@@ -449,6 +417,68 @@ func AddOrUpdateProvider(path string, p ProviderConfig) error {
 		f.Providers = append(f.Providers, p)
 	}
 	return SaveConfigFile(path, f)
+}
+
+// UpdateProviderCookies merges a full Cookie header into an existing provider
+// entry (used after CDP refresh so Cloudflare clearance stays current).
+func UpdateProviderCookies(path, id, sessionKey, cookies string) error {
+	f, err := LoadConfigFile(path)
+	if err != nil {
+		return err
+	}
+	for i, p := range f.Providers {
+		if p.ID != id {
+			continue
+		}
+		if sessionKey != "" {
+			f.Providers[i].SessionKey = sessionKey
+		}
+		f.Providers[i].Cookies = cookies
+		return SaveConfigFile(path, f)
+	}
+	return fmt.Errorf("provider %s not found", id)
+}
+
+// UpdateProviderConversation persists Claude web org+conversation IDs so the
+// next process reuses the same thread (empty conv clears → next send creates).
+func UpdateProviderConversation(path, id, orgID, conversationID string) error {
+	return UpdateProviderChatState(path, id, ChatState{
+		OrgID:          orgID,
+		ConversationID: conversationID,
+	})
+}
+
+// ChatState is the persisted multi-turn thread for web providers.
+type ChatState struct {
+	OrgID           string
+	ConversationID  string
+	ParentMessageID string
+	MetadataJSON    string
+	ClearParent     bool // when true, wipe ParentMessageID even if empty
+	ClearMetadata   bool
+}
+
+// UpdateProviderChatState merges conversation continuity fields for web adapters.
+func UpdateProviderChatState(path, id string, st ChatState) error {
+	f, err := LoadConfigFile(path)
+	if err != nil {
+		return err
+	}
+	for i, p := range f.Providers {
+		if p.ID != id {
+			continue
+		}
+		f.Providers[i].OrgID = st.OrgID
+		f.Providers[i].ConversationID = st.ConversationID
+		if st.ParentMessageID != "" || st.ClearParent {
+			f.Providers[i].ParentMessageID = st.ParentMessageID
+		}
+		if st.MetadataJSON != "" || st.ClearMetadata {
+			f.Providers[i].MetadataJSON = st.MetadataJSON
+		}
+		return SaveConfigFile(path, f)
+	}
+	return fmt.Errorf("provider %s not found", id)
 }
 
 func RemoveProvider(path string, id string) error {

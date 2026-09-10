@@ -1,6 +1,6 @@
 // Package types holds the shared request/response shapes and the
 // ProviderAdapter interface every chat provider (OpenAI-compatible API,
-// DuckDuckGo AI, ChatGPT Web, ...) implements.
+// ChatGPT Web, Claude Web, Gemini, ...) implements.
 package types
 
 import (
@@ -33,6 +33,11 @@ type ChatRequest struct {
 	Messages    []ChatMessage `json:"messages"`
 	Stream      bool          `json:"stream"`
 	Temperature float64       `json:"temperature,omitempty"`
+	// FullContext tells web backends to flatten the entire client history
+	// into one prompt (Claude Code / Codex send full turns every request)
+	// instead of only the last user message on a server-side thread.
+	// Not serialized on the wire — set by the Anthropic/OpenAI bridges.
+	FullContext bool `json:"-"`
 }
 
 // StreamChunk is one piece of a streamed reply. The producer closes the

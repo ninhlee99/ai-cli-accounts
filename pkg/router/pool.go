@@ -1,5 +1,3 @@
-// Package router picks which provider adapter handles a chat request,
-// failing over to the next one when the current one is rate-limited.
 package router
 
 import (
@@ -15,16 +13,20 @@ import (
 )
 
 // rateLimitCooldown is how long an adapter sits out after answering with a
-// rate limit, before Send tries it again.
-const rateLimitCooldown = 30 * time.Minute
+// rate limit, before Send tries it again. Keep short: Claude/ChatGPT web
+// free tiers often return brief 429s; a 30-minute sit-out made interactive
+// `am chat` unusable after one burst.
+const rateLimitCooldown = 2 * time.Minute
 
 // AccountPoolRouter dispatches a ChatRequest to the highest-priority
-// adapter that isn't currently cooling down, falling over to the next one
-// whenever an adapter errors (with a 30-minute cooldown specifically for
-// ErrRateLimitReached, per the failover policy this router implements).
+// adapter that isn't currently cooling down. A preferred adapter from
+// `am sw <provider>` is tried first; rate-limit failover promotes the
+// winner to preferred so status stays in sync. Non-rate-limit failures
+// on a pin do not silently jump to another provider.
 type AccountPoolRouter struct {
 	adapters    []types.ProviderAdapter
 	preferred   string
+	lastUsed    string
 	mu          sync.RWMutex
 	cooldownMap map[string]time.Time
 }
@@ -38,11 +40,33 @@ func NewAccountPoolRouter(adapters []types.ProviderAdapter) *AccountPoolRouter {
 	return &AccountPoolRouter{adapters: sorted, cooldownMap: make(map[string]time.Time)}
 }
 
-// SetPreferred sets a preferred adapter to try before all others.
+// SetPreferred sets the active/pinned adapter shown in status and tried
+// first by Send. Auto-failover also calls this so status tracks reality.
 func (r *AccountPoolRouter) SetPreferred(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.preferred = id
+}
+
+// ConversationResetter is implemented by web adapters that keep a
+// server-side chat thread. Called on `am sw` so the next turn does not
+// continue an unrelated conversation.
+type ConversationResetter interface {
+	ResetConversation()
+}
+
+// ResetConversations clears server-side web threads on every adapter that
+// supports it (Claude/ChatGPT/Gemini web). Safe to call when switching
+// providers so Claude Code history is not mixed with an old UI chat.
+func (r *AccountPoolRouter) ResetConversations() {
+	r.mu.RLock()
+	adapters := append([]types.ProviderAdapter(nil), r.adapters...)
+	r.mu.RUnlock()
+	for _, a := range adapters {
+		if rr, ok := a.(ConversationResetter); ok {
+			rr.ResetConversation()
+		}
+	}
 }
 
 // Preferred returns the currently preferred adapter ID.
@@ -52,9 +76,26 @@ func (r *AccountPoolRouter) Preferred() string {
 	return r.preferred
 }
 
-// Send tries each adapter in priority order (or preferred adapter first),
-// skipping any still in cooldown, and returns the channel of the first one
-// that starts streaming successfully.
+// LastUsed returns the adapter ID that last successfully started a stream.
+func (r *AccountPoolRouter) LastUsed() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.lastUsed
+}
+
+// Len returns how many adapters the pool currently holds (including
+// auto-surfaced Codex fallback).
+func (r *AccountPoolRouter) Len() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.adapters)
+}
+
+// Send tries adapters in priority order. With a preferred pin (`am sw`):
+// try that adapter first; on rate-limit only, fail over and promote the
+// winner to preferred so status shows the auto-switch. Other errors stay
+// pinned (no silent jump to Gemini). Without a pin: normal priority
+// failover, and any failover winner is promoted to preferred.
 func (r *AccountPoolRouter) Send(ctx context.Context, req *types.ChatRequest) (<-chan types.StreamChunk, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -67,37 +108,56 @@ func (r *AccountPoolRouter) Send(ctx context.Context, req *types.ChatRequest) (<
 	r.mu.RUnlock()
 
 	var errs []error
+	var skippedPreferred bool
 
-	// If a preferred adapter is set, try it first
 	if preferredID != "" {
 		for _, a := range adapters {
-			if a.ID() == preferredID {
-				if !r.cooling(a.ID()) {
-					ch, err := a.SendMessageStream(ctx, req)
-					if err == nil {
-						return ch, nil
-					}
-					if errors.Is(err, types.ErrRateLimitReached) {
-						r.setCooldown(a.ID())
-					}
-					log.Printf("router: preferred adapter %s failed: %v", a.ID(), err)
-					errs = append(errs, fmt.Errorf("%s: %w", a.ID(), err))
-				}
+			if a.ID() != preferredID {
+				continue
+			}
+			if r.cooling(a.ID()) {
+				skippedPreferred = true
+				errs = append(errs, fmt.Errorf("%s: cooling down", a.ID()))
 				break
 			}
+			ch, err := a.SendMessageStream(ctx, req)
+			if err == nil {
+				r.markUsed(a.ID(), true)
+				return ch, nil
+			}
+			if errors.Is(err, types.ErrRateLimitReached) {
+				r.setCooldown(a.ID())
+				skippedPreferred = true
+				log.Printf("router: preferred %s rate-limited — failing over and will activate winner", a.ID())
+				errs = append(errs, fmt.Errorf("%s: %w", a.ID(), err))
+				break
+			}
+			log.Printf("router: preferred adapter %s failed (pinned, no failover): %v", a.ID(), err)
+			return nil, fmt.Errorf("%s: %w", a.ID(), err)
+		}
+		if !skippedPreferred && len(errs) == 0 {
+			return nil, fmt.Errorf("router: preferred adapter %q not in pool", preferredID)
 		}
 	}
 
-	// Normal priority order for all remaining adapters
 	for _, a := range adapters {
-		if a.ID() == preferredID {
-			continue // already tried above
+		if preferredID != "" && a.ID() == preferredID {
+			continue
 		}
 		if r.cooling(a.ID()) {
 			continue
 		}
 		ch, err := a.SendMessageStream(ctx, req)
 		if err == nil {
+			// Promote winner so status ● active matches who answered
+			// (covers unpinned pick + rate-limit failover from a pin).
+			was := preferredID
+			r.markUsed(a.ID(), true)
+			if was != "" && was != a.ID() {
+				log.Printf("router: auto-switched active provider %s → %s", was, a.ID())
+			} else if was == "" {
+				log.Printf("router: active provider → %s", a.ID())
+			}
 			return ch, nil
 		}
 		if errors.Is(err, types.ErrRateLimitReached) {
@@ -128,6 +188,17 @@ func (r *AccountPoolRouter) setCooldown(id string) {
 	r.cooldownMap[id] = time.Now().Add(rateLimitCooldown)
 }
 
+// markUsed records lastUsed; when promote is true also sets preferred so
+// `am status` shows the auto-switched adapter as active.
+func (r *AccountPoolRouter) markUsed(id string, promote bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lastUsed = id
+	if promote {
+		r.preferred = id
+	}
+}
+
 // Status returns a summary map of each adapter, its priority, cooldown, and whether it is preferred.
 func (r *AccountPoolRouter) Status() []map[string]any {
 	r.mu.RLock()
@@ -141,6 +212,7 @@ func (r *AccountPoolRouter) Status() []map[string]any {
 			"priority":  a.Priority(),
 			"cooling":   cooling,
 			"preferred": a.ID() == r.preferred,
+			"last_used": a.ID() == r.lastUsed,
 		}
 		if cooling {
 			m["cooldown_until"] = cd.Format(time.RFC3339)

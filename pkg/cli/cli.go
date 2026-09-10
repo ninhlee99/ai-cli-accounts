@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -51,12 +52,13 @@ Account Profiles:
   amux status                 proxy state, rate limits (5h/7d), provider pool
 
 Multi-Provider Gateway & Plugins:
-  amux login [provider] [--model M]
-                            login chatgpt, claude, gemini, github, groq (each login adds a
-                            new session — you can hold several accounts per provider and
-                            the pool fails over between them on rate limit); --model
-                            overrides that provider's default model
+  amux login [provider] [--browser] [--token T] [--cookie C] [--refresh R] [--model M]
+                            chatgpt/claude: open browser, you log in, amux captures cookie via CDP
+                            (no Keychain). gemini-web: gemini.google.com cookies.
+                            gemini: opens AI Studio for API key paste.
+  amux doctor providers     live 1-turn probe of every pool adapter (OK/FAIL)
   amux accounts               list multi-provider accounts in pool, sorted by priority
+  amux accounts rm <id>       remove a pool account (same as: amux api rm)
   amux accounts priority <id> <N>
                             set a pool account's priority (lower = tried first); hot-reloads
                             a running proxy, no restart needed
@@ -64,7 +66,7 @@ Multi-Provider Gateway & Plugins:
                             change a pool account's model; hot-reloads a running proxy
   amux api add <name> --endpoint <url> --api-key <key> [--model M] [--priority N]
                             add OpenAI-compatible provider
-  amux api rm <name>          remove provider
+  amux api rm <name>          remove provider (alias of accounts rm)
   amux api ls                 list provider accounts
   amux chat [--provider <id>] [prompt]
                             interactive terminal chat via multi-provider pool; --provider
@@ -81,7 +83,9 @@ Monitoring & Utilities:
   amux usage [day|week|month|all] [-D|--detail] [-d YYYY-MM-DD] [-p PROJECT]
                             token usage analytics
   amux run <tool> [args...]   exec tool (currently: claude) routed through the proxy
-  amux proxy [up|down]        run or manage background proxy daemon (default :8787)
+  amux proxy [up|down] [--threshold N]  run/manage proxy daemon (default :8787);
+                            --threshold N  auto-switch Claude account when 5h/7d
+                            utilization >= N% (default 95). Also: AM_ROTATE_THRESHOLD
   amux env                    print export ANTHROPIC_BASE_URL=... for eval "$(amux env)"
   amux hook [install|uninstall|status]
   amux export [tool] [name..] [-o file|--stdout]  encrypted profile bundle
@@ -203,6 +207,13 @@ func Run(rawArgs []string) {
 	case "login":
 		ui.CmdLogin(args)
 
+	case "doctor":
+		if len(args) > 0 && (args[0] == "providers" || args[0] == "provider") {
+			ui.CmdDoctorProviders()
+			return
+		}
+		fmt.Println("Usage: amux doctor providers")
+
 	case "accounts":
 		ui.CmdAccountsCmd(args)
 
@@ -283,7 +294,8 @@ func Run(rawArgs []string) {
 		if len(args) > 0 {
 			switch args[0] {
 			case "up":
-				proxy.CmdProxyUp()
+				threshold := proxyThresholdFromArgs(args[1:])
+				proxy.CmdProxyUp(threshold)
 				return
 			case "down":
 				force := false
@@ -303,6 +315,7 @@ func Run(rawArgs []string) {
 		addr := "127.0.0.1:8787"
 		upstream := "https://api.anthropic.com"
 		supervise := false
+		threshold := proxyThresholdFromArgs(args)
 		for i := 0; i < len(args); i++ {
 			switch args[i] {
 			case "--addr":
@@ -315,6 +328,11 @@ func Run(rawArgs []string) {
 					upstream = args[i+1]
 					i++
 				}
+			case "--threshold":
+				// consumed by proxyThresholdFromArgs
+				if i+1 < len(args) {
+					i++
+				}
 			case "--supervise":
 				// Internal: how CmdProxyUp spawns the daemon (watchdog +
 				// Anthropic-direct fallback wrapper around the real
@@ -324,8 +342,9 @@ func Run(rawArgs []string) {
 				supervise = true
 			}
 		}
+		proxy.SetUsedThreshold(threshold)
 		if supervise {
-			if err := proxy.RunSupervisor(addr, upstream); err != nil {
+			if err := proxy.RunSupervisor(addr, upstream, threshold); err != nil {
 				die("proxy supervisor error: %v", err)
 			}
 			return
@@ -351,6 +370,26 @@ func Run(rawArgs []string) {
 	default:
 		die("unknown command %q — run 'amux help' for usage", cmd)
 	}
+}
+
+// proxyThresholdFromArgs reads --threshold N from args, else AM_ROTATE_THRESHOLD,
+// else the 95% default. Values may be percent (95) or fraction (0.95).
+func proxyThresholdFromArgs(args []string) float64 {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--threshold" && i+1 < len(args) {
+			f, err := strconv.ParseFloat(args[i+1], 64)
+			if err != nil {
+				die("invalid --threshold %q", args[i+1])
+			}
+			return proxy.ParseUsedThreshold(f)
+		}
+	}
+	if env := os.Getenv("AM_ROTATE_THRESHOLD"); env != "" {
+		if f, err := strconv.ParseFloat(env, 64); err == nil {
+			return proxy.ParseUsedThreshold(f)
+		}
+	}
+	return proxy.DefaultUsedThreshold
 }
 
 func toolAndName(rest []string) (tool, name string) {

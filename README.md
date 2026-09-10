@@ -139,7 +139,7 @@ Hệ thống ưu tiên gọi các provider theo số thứ tự `priority` từ 
       "priority": 2,
       "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
       "apiKey": "env:GOOGLE_AI_STUDIO_KEY",
-      "model": "gemini-2.0-flash"
+      "model": "gemini-3.6-flash"
     },
     {
       "id": "groq",
