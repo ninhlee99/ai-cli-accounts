@@ -15,12 +15,43 @@ import (
 )
 
 const (
-	// rotate when the account reports this fraction (or fewer) of its window left
-	rotateThreshold = 0.06
+	// DefaultUsedThreshold is the utilization (0–1) at which Observe
+	// auto-rotates. CLI exposes this as --threshold percent (default 95).
+	DefaultUsedThreshold = 0.95
 	// don't return to an account that hit a limit until this long after its reset
 	cooldownPad = 30 * time.Second
 	refreshLead = 2 * time.Minute
 )
+
+// package-level default applied by NewRotator; set via SetUsedThreshold
+// before RunProxy / RunSupervisor so --threshold / AM_ROTATE_THRESHOLD
+// reach the daemon without threading a new arg through every call site.
+var usedThresholdDefault = DefaultUsedThreshold
+
+// SetUsedThreshold records the auto-rotate utilization threshold for
+// subsequent NewRotator calls. Accepts either a percent (95) or a
+// fraction (0.95); invalid / zero falls back to DefaultUsedThreshold.
+func SetUsedThreshold(v float64) {
+	usedThresholdDefault = ParseUsedThreshold(v)
+}
+
+// UsedThreshold returns the currently configured package default.
+func UsedThreshold() float64 { return usedThresholdDefault }
+
+// ParseUsedThreshold normalizes a CLI / env value to a 0–1 fraction.
+// Values > 1 are treated as percents (95 → 0.95). ≤0 or >100 → default.
+func ParseUsedThreshold(v float64) float64 {
+	if v <= 0 {
+		return DefaultUsedThreshold
+	}
+	if v > 1 {
+		if v > 100 {
+			return DefaultUsedThreshold
+		}
+		return v / 100
+	}
+	return v
+}
 
 // Rotator holds the in-memory token state and auto-rotates on rate limits.
 type Rotator struct {
@@ -34,6 +65,9 @@ type Rotator struct {
 	cooldown map[string]time.Time
 	dead     map[string]bool // profile name -> refresh token confirmed dead; skip in Rotate() until re-login
 
+	// usedThreshold: rotate when window utilization >= this (default 0.95).
+	usedThreshold float64
+
 	switches   int
 	lastSwitch time.Time
 
@@ -46,7 +80,7 @@ type Rotator struct {
 }
 
 func NewRotator(tool string) *Rotator {
-	r := &Rotator{tool: tool}
+	r := &Rotator{tool: tool, usedThreshold: usedThresholdDefault}
 	r.Load()
 	return r
 }
@@ -277,10 +311,17 @@ func (r *Rotator) Observe(resp *http.Response) {
 	}
 	r.mu.Unlock()
 
+	r.mu.Lock()
+	thresh := r.usedThreshold
+	if thresh <= 0 {
+		thresh = DefaultUsedThreshold
+	}
+	r.mu.Unlock()
+
 	hardLimited := resp.StatusCode == http.StatusTooManyRequests
-	nearLimit := (fiveH.Known && fiveH.Used >= 1-rotateThreshold) ||
+	nearLimit := (fiveH.Known && fiveH.Used >= thresh) ||
 		(!fiveH.Known && remOK && !limOK && rem <= 2) ||
-		(!fiveH.Known && frac >= 1-rotateThreshold)
+		(!fiveH.Known && frac >= thresh)
 
 	if hardLimited || nearLimit {
 		reason := "near limit"
@@ -289,6 +330,99 @@ func (r *Rotator) Observe(resp *http.Response) {
 		}
 		r.Rotate(name, reason)
 	}
+}
+
+// AllUnavailable reports whether every saved profile is either in cooldown
+// or marked dead — i.e. Claude reverse-proxy has nowhere useful to go and
+// the gateway should fall over to the free provider pool (ChatGPT / Gemini /
+// Codex) until a window resets.
+func (r *Rotator) AllUnavailable() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.order) == 0 {
+		return true
+	}
+	now := time.Now()
+	for _, n := range r.order {
+		if r.dead[n] {
+			continue
+		}
+		if cd, ok := r.cooldown[n]; ok && now.Before(cd) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// ProfileCount returns how many Claude Code profiles the rotator knows about.
+func (r *Rotator) ProfileCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.order)
+}
+
+// ShouldFailoverToProviderPool is true when every Claude Code profile is
+// cooling or dead. Callers then bridge to the tool failover pool (API→web,
+// As soon as any Claude cooldown expires, this returns
+// false and the next request goes back through Anthropic.
+func (r *Rotator) ShouldFailoverToProviderPool() bool {
+	return r.ProfileCount() > 0 && r.AllUnavailable()
+}
+
+// EnsureUsableActive makes sure the active Claude profile is one that is
+// not cooling/dead. Used when returning from provider-pool failover after a
+// rate-limit window resets — picks the first available account and installs
+// its credentials. Returns false only when every profile is still unusable.
+func (r *Rotator) EnsureUsableActive() bool {
+	r.mu.Lock()
+	if len(r.order) == 0 {
+		r.mu.Unlock()
+		return false
+	}
+	now := time.Now()
+	usable := func(n string) bool {
+		if r.dead[n] {
+			return false
+		}
+		if cd, ok := r.cooldown[n]; ok && now.Before(cd) {
+			return false
+		}
+		return true
+	}
+	cur := r.order[r.idx]
+	if usable(cur) {
+		r.mu.Unlock()
+		return true
+	}
+	from := cur
+	for i, n := range r.order {
+		if !usable(n) {
+			continue
+		}
+		r.idx = i
+		r.switches++
+		r.autoSwitches[from]++
+		r.lastSwitch = now
+		target := n
+		r.mu.Unlock()
+
+		profile.WriteActivePointer(r.tool, target)
+		if !profile.InstallActiveProfile(target) {
+			r.mu.Lock()
+			r.dead[target] = true
+			// keep searching under lock — fall through by re-entering loop
+			// via recursive-style continue: re-lock and try next.
+			// Simpler: mark dead and call EnsureUsableActive again.
+			r.mu.Unlock()
+			log.Printf("amux: Claude %s refresh dead while recovering, trying next", target)
+			return r.EnsureUsableActive()
+		}
+		log.Printf("amux: Claude account available again — switched back to %s", target)
+		return true
+	}
+	r.mu.Unlock()
+	return false
 }
 
 // parseWindow reads anthropic-ratelimit-unified-<suffix>-{utilization,reset}
@@ -477,6 +611,7 @@ func (r *Rotator) Status() map[string]any {
 		"tool":        r.tool,
 		"switches":    r.switches,
 		"last_switch": r.lastSwitch,
+		"threshold":   int(r.usedThreshold*100 + 0.5),
 		"accounts":    accts,
 	}
 }

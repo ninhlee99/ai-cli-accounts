@@ -147,14 +147,8 @@ func TestBuildAdapter_DefaultsAndMissing(t *testing.T) {
 		t.Errorf("expected default model gpt-4o, got %s", oa.TargetModel)
 	}
 
-	// Defaults for duckduckgo
-	a2, err := BuildAdapter(ProviderConfig{Type: "duckduckgo"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	ddg := a2.(*DuckDuckGoAdapter)
-	if ddg.TargetModel != "claude-3-haiku-20240307" {
-		t.Errorf("expected default duckduckgo model, got %s", ddg.TargetModel)
+	if _, err := BuildAdapter(ProviderConfig{Type: "duckduckgo"}); err == nil {
+		t.Fatal("expected duckduckgo type to be unsupported")
 	}
 }
 
@@ -301,17 +295,10 @@ func TestProvider_IsConfigured(t *testing.T) {
 		t.Errorf("expected unset session token to be unconfigured")
 	}
 
-	// Disabled duckduckgo
+	// Explicitly disabled openai_compatible
 	f := false
-	p4 := ProviderConfig{Type: "duckduckgo", Enabled: &f}
+	p4 := ProviderConfig{Type: "openai_compatible", APIKey: "sk-x", Enabled: &f}
 	if p4.IsConfigured() {
-		t.Errorf("expected disabled duckduckgo to be unconfigured")
-	}
-
-	// Enabled duckduckgo
-	tr := true
-	p5 := ProviderConfig{Type: "duckduckgo", Enabled: &tr}
-	if !p5.IsConfigured() {
-		t.Errorf("expected enabled duckduckgo to be configured")
+		t.Errorf("expected disabled provider to be unconfigured")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os/exec"
+	"strconv"
 	"time"
 )
 
@@ -23,17 +24,23 @@ import (
 //     processes keep working in degraded form instead of getting
 //     connection-refused. Stays that way until `am proxy up` recovers it
 //     (see proxyStatusMode/CmdProxyUp).
-func RunSupervisor(addr, upstream string) error {
+func RunSupervisor(addr, upstream string, threshold float64) error {
 	bin, err := resolveAMBin()
 	if err != nil {
 		return err
 	}
+	SetUsedThreshold(threshold)
+	threshArg := strconv.FormatFloat(ParseUsedThreshold(threshold)*100, 'f', -1, 64)
 
 	var crashes []time.Time
 	attempt := 0
 	for {
 		startedAt := time.Now()
-		cmd := exec.Command(bin, "proxy", "--addr", addr, "--upstream", upstream)
+		cmd := exec.Command(bin, "proxy",
+			"--addr", addr,
+			"--upstream", upstream,
+			"--threshold", threshArg,
+		)
 		if err := cmd.Start(); err != nil {
 			log.Printf("amux proxy supervisor: spawn failed: %v", err)
 			crashes = append(crashes, time.Now())

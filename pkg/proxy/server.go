@@ -98,7 +98,7 @@ func RunProxy(addr, upstream string) error {
 
 	sw := &swappableHandler{}
 	var srv *http.Server
-	handler := newHandler(rot, life, mode, pool, rp, upstream, sw, func() {
+	handler := newHandler(rot, life, mode, pool, pool, rp, upstream, sw, func() {
 		if srv != nil {
 			_ = srv.Close()
 		}
@@ -161,22 +161,22 @@ func newReverseProxy(upstream string, rot *Rotator) (*httputil.ReverseProxy, err
 }
 
 // newHandler builds the full HTTP handler serving Claude Code, the OpenAI
-// gateway, and the /_am/ admin endpoints. Split out from RunProxy so it can
-// be exercised directly with httptest (no live listener, no goroutine)
-// instead of only being reachable through a real server socket — see
-// server_test.go. `shutdown` is called by /_am/shutdown instead of closing
-// an *http.Server directly, since the server that wraps this handler
-// doesn't exist yet when the handler is built (RunProxy ties the two
-// together via a closure).
-func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, pool *router.AccountPoolRouter, rp http.Handler, upstream string, sw *swappableHandler, shutdown func()) http.Handler {
+// gateway, and the /_am/ admin endpoints.
+//
+// chatPool serves /v1/chat/completions; toolPool serves Claude/Codex
+// /v1/messages failover. Callers may pass the same router for both.
+func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPool *router.AccountPoolRouter, rp http.Handler, upstream string, sw *swappableHandler, shutdown func()) http.Handler {
+	if toolPool == nil {
+		toolPool = chatPool
+	}
 	mux := http.NewServeMux()
 
 	// 1. OpenAI Standard Gateway
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
-		bridge.HandleChatCompletions(w, r, pool)
+		bridge.HandleChatCompletions(w, r, chatPool)
 	})
 	mux.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
-		bridge.HandleChatCompletions(w, r, pool)
+		bridge.HandleChatCompletions(w, r, chatPool)
 	})
 	mux.HandleFunc("/v1/models", bridge.HandleModels)
 	mux.HandleFunc("/models", bridge.HandleModels)
@@ -188,7 +188,8 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, pool *router.Acc
 		s["sessions"] = life.Sessions()
 		s["upstream"] = upstream
 		s["mode"] = mode.Get()
-		s["pool"] = pool.Status()
+		s["pool"] = chatPool.Status()
+		s["tool_pool"] = toolPool.Status()
 		_ = json.NewEncoder(w).Encode(s)
 	})
 
@@ -209,7 +210,8 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, pool *router.Acc
 
 	mux.HandleFunc("/_am/switch-provider", func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("to")
-		pool.SetPreferred(name)
+		chatPool.SetPreferred(name)
+		toolPool.SetPreferred(name)
 		mode.Set("provider")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"active": name, "mode": "provider"})
@@ -218,22 +220,9 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, pool *router.Acc
 	mux.HandleFunc("/_am/session", func(w http.ResponseWriter, r *http.Request) {
 		pid, err := strconv.Atoi(r.URL.Query().Get("pid"))
 		if err != nil || pid <= 0 {
-			// Reject rather than silently tracking pid=0: pruneDead() below
-			// can never reap it (see lifecycle.go — kill(0, sig) targets the
-			// caller's whole process group and always succeeds), so an
-			// invalid pid here would otherwise create an immortal phantom
-			// session that inflates `am status` and can permanently block
-			// `am proxy down --force`'s attached-session check.
 			http.Error(w, "invalid or missing 'pid'", http.StatusBadRequest)
 			return
 		}
-		// "event" is the current param name; "op" is what the proxy spoke
-		// before the SessionStart/SessionEnd rename (see old proxy.go). A
-		// background `am proxy` process is long-lived and isn't restarted
-		// just because the `am` binary on disk was upgraded, so an
-		// old-server-new-client mismatch is a real rolling-upgrade case, not
-		// just theoretical — accept either so an already-running old-code
-		// proxy and a freshly-built client (or vice versa) still agree.
 		event := r.URL.Query().Get("event")
 		if event == "" {
 			event = r.URL.Query().Get("op")
@@ -250,8 +239,9 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, pool *router.Acc
 	mux.HandleFunc("/_am/pool", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"preferred": pool.Preferred(),
-			"providers": pool.Status(),
+			"preferred":  chatPool.Preferred(),
+			"providers":  chatPool.Status(),
+			"tool_pool":  toolPool.Status(),
 		})
 	})
 
@@ -259,7 +249,10 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, pool *router.Acc
 		profile.SyncActiveFromSystem("claude")
 		rot.RefreshFromDisk()
 		if reloaded, err := provider.LoadAccounts(provider.DefaultAccountsPath()); err == nil {
-			pool.Reload(reloaded)
+			chatPool.Reload(reloaded)
+			if toolPool != chatPool {
+				toolPool.Reload(reloaded)
+			}
 		}
 		fmt.Fprintf(w, "%d\n", len(rot.Names()))
 	})
@@ -268,10 +261,6 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, pool *router.Acc
 		fmt.Fprintln(w, "ok")
 		go func() {
 			if life.Sessions() > 0 {
-				// Hand off to Anthropic-direct passthrough for a short
-				// grace window instead of yanking the socket out from
-				// under an attached claude session — see swappableHandler
-				// and shutdownGrace above.
 				if ph, err := newPassthroughHandler(rot, life, upstream, false, nil); err == nil {
 					sw.Set(ph)
 				} else {
@@ -288,21 +277,44 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, pool *router.Acc
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 
-		// Admin routes
 		if strings.HasPrefix(path, "/_am/") {
 			mux.ServeHTTP(w, r)
 			return
 		}
 
-		// OpenAI routes
 		if strings.HasSuffix(path, "/chat/completions") || path == "/v1/models" || path == "/models" {
 			mux.ServeHTTP(w, r)
 			return
 		}
 
-		// Anthropic messages endpoint: /v1/messages
+		// Anthropic messages (/v1/messages) — Claude Code / tool clients.
 		if strings.HasSuffix(path, "/messages") {
-			if mode.Get() == "provider" {
+			hasAPIKey := r.Header.Get("X-Api-Key") != "" || os.Getenv("ANTHROPIC_API_KEY") != ""
+
+			usePool := false
+			pool := toolPool
+			autoFromClaude := false
+			switch {
+			case mode.Get() == "provider":
+				usePool = true
+			case hasAPIKey:
+				usePool = false
+			case rot.ShouldFailoverToProviderPool():
+				usePool = toolPool.Len() > 0
+				if usePool {
+					autoFromClaude = true
+					log.Printf("amux: all Claude accounts unavailable — failover to provider pool (API→web)")
+				}
+			case rot.Token() != "" || rot.ProfileCount() > 0:
+				if rot.ProfileCount() > 0 {
+					rot.EnsureUsableActive()
+				}
+				usePool = rot.Token() == "" && !hasAPIKey
+			default:
+				usePool = toolPool.Len() > 0
+			}
+
+			if usePool {
 				body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
 				if err != nil {
 					http.Error(w, "read request body: "+err.Error(), http.StatusBadRequest)
@@ -310,29 +322,24 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, pool *router.Acc
 				}
 				if err := bridge.HandleClaudeMessages(w, r, pool, body); err != nil {
 					log.Printf("bridge /v1/messages error: %v", err)
+					return
+				}
+				// Claude→pool auto-failover: flip mode + preferred so status
+				// shows the provider that actually answered (● active).
+				if autoFromClaude {
+					if id := pool.LastUsed(); id != "" {
+						pool.SetPreferred(id)
+						mode.Set("provider")
+						log.Printf("amux: auto-switched active provider → %s (status updated)", id)
+					}
 				}
 				return
 			}
 
-			// In "claude" mode: if we have a valid token or explicit API key (header or env):
-			if rot.Token() != "" || r.Header.Get("X-Api-Key") != "" || os.Getenv("ANTHROPIC_API_KEY") != "" {
-				rp.ServeHTTP(w, r)
-				return
-			}
-
-			// If no Claude accounts are active, bridge to pool
-			body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
-			if err != nil {
-				http.Error(w, "read request body: "+err.Error(), http.StatusBadRequest)
-				return
-			}
-			if err := bridge.HandleClaudeMessages(w, r, pool, body); err != nil {
-				log.Printf("bridge /v1/messages fallback error: %v", err)
-			}
+			rp.ServeHTTP(w, r)
 			return
 		}
 
-		// Fallback reverse proxy
 		rp.ServeHTTP(w, r)
 	})
 }

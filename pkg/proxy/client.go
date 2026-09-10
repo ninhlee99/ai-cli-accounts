@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -77,7 +78,17 @@ func proxyStatusMode() string {
 	return s.Mode
 }
 
-func CmdProxyUp() {
+func CmdProxyUp(threshold ...float64) {
+	thresh := DefaultUsedThreshold
+	if len(threshold) > 0 && threshold[0] > 0 {
+		thresh = ParseUsedThreshold(threshold[0])
+	} else if env := os.Getenv("AM_ROTATE_THRESHOLD"); env != "" {
+		if f, err := strconv.ParseFloat(env, 64); err == nil {
+			thresh = ParseUsedThreshold(f)
+		}
+	}
+	SetUsedThreshold(thresh)
+
 	needSpawn := !ProxyUp()
 	if !needSpawn && proxyStatusMode() == "degraded" {
 		// A crash-looped supervisor (see RunSupervisor) left a bare
@@ -96,13 +107,14 @@ func CmdProxyUp() {
 			fmt.Fprintf(os.Stderr, "amux: %v\n", err)
 			return
 		}
-		// Pass --addr explicitly so the spawned supervisor binds the same
-		// address CmdProxyUp/ProxyUp just checked (AM_PROXY_ADDR, or the
-		// shared 127.0.0.1:8787 default) — otherwise a custom AM_PROXY_ADDR
-		// would be respected for health checks but the spawned process
-		// would silently bind the hardcoded default instead, e.g. when
-		// recovering from degraded mode above.
-		cmd := exec.Command(bin, "proxy", "--supervise", "--addr", proxyAddr())
+		// Pass --addr / --threshold explicitly so the spawned supervisor
+		// binds the same address CmdProxyUp/ProxyUp just checked and
+		// inherits the rotate threshold (AM_PROXY_ADDR / AM_ROTATE_THRESHOLD
+		// alone aren't enough — child argv is the source of truth).
+		cmd := exec.Command(bin, "proxy", "--supervise",
+			"--addr", proxyAddr(),
+			"--threshold", strconv.FormatFloat(thresh*100, 'f', -1, 64),
+		)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 		if err := cmd.Start(); err != nil {
 			fmt.Fprintf(os.Stderr, "amux: start proxy: %v\n", err)

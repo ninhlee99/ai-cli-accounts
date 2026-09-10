@@ -1,6 +1,6 @@
 // Package types holds the shared request/response shapes and the
 // ProviderAdapter interface every chat provider (OpenAI-compatible API,
-// DuckDuckGo AI, ChatGPT Web, ...) implements.
+// ChatGPT Web, Claude Web, Gemini, ...) implements.
 package types
 
 import (

@@ -15,7 +15,7 @@ type GeminiAdapter struct {
 	AdapterID   string
 	PriorityLvl int
 	APIKey      string
-	TargetModel string // default: gemini-2.0-flash
+	TargetModel string // default: gemini-3.6-flash
 	HTTPClient  *http.Client
 
 	wrapped types.ProviderAdapter
@@ -23,7 +23,7 @@ type GeminiAdapter struct {
 
 func NewGeminiAdapter(id string, priority int, apiKey, model string) *GeminiAdapter {
 	if model == "" {
-		model = "gemini-2.0-flash"
+		model = "gemini-3.6-flash"
 	}
 	if id == "" {
 		id = "google-ai-studio"

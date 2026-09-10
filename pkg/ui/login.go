@@ -2,12 +2,15 @@ package ui
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"amux-accounts/pkg/browser"
 	"amux-accounts/pkg/provider"
@@ -15,34 +18,82 @@ import (
 	"amux-accounts/pkg/types"
 )
 
-// CmdLogin handles the interactive login flow for supported providers.
+// loginFlags holds optional non-interactive credentials passed on the CLI.
+type loginFlags struct {
+	model      string
+	token      string // access token / API key / sessionKey
+	cookie     string // raw Cookie header or name=value
+	refresh    string // refresh token when the web session exposes one
+	useBrowser bool   // open Chromium via CDP and capture cookie (default when no token/cookie)
+	noBrowser  bool
+}
+
+func parseLoginFlags(args []string) (providerName string, f loginFlags, rest []string) {
+	if len(args) == 0 {
+		return "", f, nil
+	}
+	providerName = strings.ToLower(args[0])
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "--model":
+			if i+1 < len(args) {
+				f.model = args[i+1]
+				i++
+			}
+		case "--token", "--access-token", "--api-key":
+			if i+1 < len(args) {
+				f.token = args[i+1]
+				i++
+			}
+		case "--cookie":
+			if i+1 < len(args) {
+				f.cookie = args[i+1]
+				i++
+			}
+		case "--refresh", "--refresh-token":
+			if i+1 < len(args) {
+				f.refresh = args[i+1]
+				i++
+			}
+		case "--browser":
+			f.useBrowser = true
+		case "--no-browser":
+			f.noBrowser = true
+		default:
+			rest = append(rest, args[i])
+		}
+	}
+	return providerName, f, rest
+}
+
+// CmdLogin handles login. Default for chatgpt/claude: open a dedicated browser
+// window, you sign in on the website, we capture the session cookie via CDP
+// (no Keychain). Pass --token/--cookie to skip the browser, or --no-browser
+// to paste manually.
 func CmdLogin(args []string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: amux login <provider> [--model M]")
+		fmt.Println("Usage: amux login <provider> [--browser] [--token T] [--cookie C] [--refresh R] [--model M]")
 		fmt.Println("Providers: chatgpt, claude, gemini, github, groq")
+		fmt.Println()
+		fmt.Println("  chatgpt / claude  default = open browser, you log in, amux captures cookie via CDP")
+		fmt.Println("                    (profile in ~/.am/browser-profiles — no Keychain)")
+		fmt.Println("  --token/--cookie  skip browser, use pasted web credentials")
+		fmt.Println("  --no-browser      paste interactively instead of opening a window")
 		return
 	}
 
-	target := strings.ToLower(args[0])
-	model := ""
-	for i := 1; i < len(args); i++ {
-		if args[i] == "--model" && i+1 < len(args) {
-			model = args[i+1]
-			i++
-		}
-	}
-
+	target, flags, _ := parseLoginFlags(args)
 	switch target {
-	case "chatgpt":
-		loginChatGPT(model)
-	case "claude":
-		loginClaude(model)
-	case "gemini":
-		loginGemini(model)
+	case "chatgpt", "chatgpt-web", "chatgptweb":
+		loginChatGPT(flags)
+	case "claude", "claude-web", "claudeweb":
+		loginClaude(flags)
+	case "gemini", "google-ai-studio", "geminiapi":
+		loginGemini(flags)
 	case "github", "github-models":
-		loginGitHubModels()
+		loginGitHubModels(flags)
 	case "groq":
-		loginGroq()
+		loginGroq(flags)
 	default:
 		fmt.Printf("Unknown provider %q. Supported: chatgpt, claude, gemini, github, groq\n", target)
 	}
@@ -55,10 +106,6 @@ func readLinePrompt(prompt string) string {
 	return strings.TrimSpace(line)
 }
 
-// nextPoolID returns the next free unified ID for a given prefix, and
-// whether any session of that prefix already exists (the multi-session
-// case, where a second/third login should slot in behind the existing
-// one(s) rather than compete for the top of the queue).
 func nextPoolID(prefix string) (id string, priorityFloor int, hasExisting bool) {
 	f, _ := provider.LoadConfigFile(provider.DefaultAccountsPath())
 	n := 0
@@ -79,41 +126,97 @@ func nextPoolID(prefix string) (id string, priorityFloor int, hasExisting bool) 
 	return types.FormatID(prefix, n+1), maxPriority + 1, hasExisting
 }
 
-func loginChatGPT(model string) {
+func loginChatGPT(f loginFlags) {
 	fmt.Println("== Login: ChatGPT Web ==")
-	tok, bName, err := browser.ExtractCookie("chatgpt.com", "__Secure-next-auth.session-token")
-	if err != nil || tok == "" {
-		tok, bName, err = browser.ExtractCookie("openai.com", "__Secure-next-auth.session-token")
-	}
 
-	if err == nil && tok != "" {
-		fmt.Printf("Found ChatGPT session token from browser (%s) automatically.\n", bName)
-		if accToken, err := browser.FetchChatGPTSessionAccessToken(tok); err == nil && accToken != "" {
-			tok = accToken
+	sessionCookie := ""
+	access := strings.TrimSpace(f.token)
+	refresh := strings.TrimSpace(f.refresh)
+
+	if f.cookie != "" {
+		sessionCookie = browser.ParseCookieHeader(f.cookie, "__Secure-next-auth.session-token")
+		if sessionCookie == "" {
+			sessionCookie = strings.TrimSpace(f.cookie)
 		}
-	} else {
-		tok = readLinePrompt("Enter ChatGPT session token (__Secure-next-auth.session-token): ")
 	}
 
-	if tok == "" {
-		fmt.Println("No session token provided. Cancelled.")
+	wantBrowser := (f.useBrowser || (access == "" && sessionCookie == "" && !f.noBrowser))
+	if wantBrowser {
+		fmt.Println("Opening dedicated browser (CDP capture, no Keychain)…")
+		tok, err := browser.CaptureCookieViaBrowser(browser.ChatGPTWebLogin, 5*time.Minute)
+		if err != nil {
+			fmt.Printf("Browser capture failed: %v\n", err)
+			if f.noBrowser || f.useBrowser {
+				return
+			}
+			fmt.Println("Falling back to paste…")
+		} else {
+			sessionCookie = tok
+			fmt.Println("Captured session cookie from browser.")
+		}
+	}
+
+	if sessionCookie == "" && access == "" {
+		fmt.Println("Paste from chatgpt.com DevTools, or leave blank to cancel:")
+		raw := readLinePrompt("  session-token cookie OR accessToken: ")
+		if raw == "" {
+			fmt.Println("Cancelled.")
+			return
+		}
+		if strings.HasPrefix(raw, "eyJ") || strings.HasPrefix(raw, "sk-") {
+			access = raw
+		} else {
+			sessionCookie = browser.ParseCookieHeader(raw, "__Secure-next-auth.session-token")
+			if sessionCookie == "" {
+				sessionCookie = raw
+			}
+		}
+	}
+
+	if access == "" && sessionCookie != "" {
+		sess, err := browser.FetchChatGPTSession(sessionCookie)
+		if err != nil {
+			fmt.Printf("Web session exchange failed: %v\n", err)
+			fmt.Println("Falling back to storing the raw cookie/token as-is.")
+			access = sessionCookie
+		} else {
+			access = sess.AccessToken
+			if refresh == "" {
+				refresh = sess.RefreshToken
+			}
+			if sess.Email != "" {
+				fmt.Printf("Session OK for %s (expires %s).\n", sess.Email, sess.Expires)
+			} else {
+				fmt.Println("Session OK — access token from chatgpt.com/api/auth/session.")
+			}
+		}
+	}
+	if refresh == "" && f.token == "" && f.cookie == "" && !wantBrowser {
+		if r := readLinePrompt("  refresh token (optional, Enter to skip): "); r != "" {
+			refresh = r
+		}
+	}
+
+	if access == "" {
+		fmt.Println("No token provided. Cancelled.")
 		return
 	}
 
 	id, priorityFloor, multi := nextPoolID(provider.PoolIDPrefix("chatgpt_web"))
-	priority := 5
+	priority := provider.PriorityWebChatGPT
 	if multi {
 		priority = priorityFloor
 	}
-
+	model := f.model
 	if model == "" {
 		model = "auto"
 	}
-	err = provider.AddOrUpdateProvider(provider.DefaultAccountsPath(), provider.ProviderConfig{
+	err := provider.AddOrUpdateProvider(provider.DefaultAccountsPath(), provider.ProviderConfig{
 		ID:           id,
 		Type:         "chatgpt_web",
 		Priority:     priority,
-		SessionToken: tok,
+		SessionToken: access,
+		RefreshToken: refresh,
 		Model:        model,
 	})
 	if err != nil {
@@ -121,62 +224,108 @@ func loginChatGPT(model string) {
 		return
 	}
 	proxy.Sync()
-	fmt.Printf("Successfully saved ChatGPT Web account to pool as %s!\n", id)
+	fmt.Printf("Saved ChatGPT Web as %s.\n", id)
 }
 
-func loginClaude(model string) {
+func loginClaude(f loginFlags) {
 	fmt.Println("== Login: Claude Web ==")
-	key, bName, err := browser.ExtractCookie("claude.ai", "sessionKey")
-	if err == nil && key != "" {
-		fmt.Printf("Found Claude sessionKey from browser (%s) automatically.\n", bName)
-	} else {
-		key = readLinePrompt("Enter Claude Web sessionKey cookie: ")
+
+	key := strings.TrimSpace(f.token)
+	if f.cookie != "" {
+		key = browser.ParseCookieHeader(f.cookie, "sessionKey")
+		if key == "" {
+			key = strings.TrimSpace(f.cookie)
+		}
+	}
+
+	wantBrowser := f.useBrowser || (key == "" && !f.noBrowser)
+	cookieHeader := ""
+	if wantBrowser && key == "" {
+		fmt.Println("Opening dedicated browser (CDP capture, no Keychain)…")
+		auth, err := browser.CaptureWebAuthViaBrowser(browser.ClaudeWebLogin, 5*time.Minute)
+		if err != nil {
+			fmt.Printf("Browser capture failed: %v\n", err)
+			if f.useBrowser {
+				return
+			}
+			fmt.Println("Falling back to paste…")
+		} else {
+			key = auth.SessionValue
+			cookieHeader = auth.CookieHeader
+			fmt.Println("Captured sessionKey from browser.")
+			if cookieHeader != "" {
+				n := strings.Count(cookieHeader, "=")
+				fmt.Printf("Captured full cookie jar (%d cookies).\n", n)
+			} else {
+				fmt.Println("Warning: cookie jar empty — Cloudflare cookies missing; re-run login if chat 403s.")
+			}
+		}
 	}
 
 	if key == "" {
-		fmt.Println("No sessionKey provided. Cancelled.")
+		key = readLinePrompt("Paste claude.ai sessionKey cookie (DevTools → Cookies): ")
+	}
+	if key == "" {
+		fmt.Println("Cancelled.")
 		return
+	}
+	if parsed := browser.ParseCookieHeader(key, "sessionKey"); parsed != "" {
+		key = parsed
+	}
+	if cookieHeader == "" && f.cookie != "" && strings.Contains(f.cookie, "=") {
+		cookieHeader = f.cookie
 	}
 
 	id, priorityFloor, multi := nextPoolID(provider.PoolIDPrefix("claude_web"))
-	priority := 6
+	priority := provider.PriorityWebClaude
 	if multi {
 		priority = priorityFloor
 	}
-
+	model := f.model
 	if model == "" {
-		model = "claude-3-5-sonnet-20241022"
+		model = "claude-sonnet-5"
 	}
-	err = provider.AddOrUpdateProvider(provider.DefaultAccountsPath(), provider.ProviderConfig{
+	err := provider.AddOrUpdateProvider(provider.DefaultAccountsPath(), provider.ProviderConfig{
 		ID:         id,
 		Type:       "claude_web",
 		Priority:   priority,
 		SessionKey: key,
+		Cookies:    cookieHeader,
 		Model:      model,
 	})
 	if err != nil {
-		fmt.Printf("Error saving configuration: %v\n", err)
+		fmt.Printf("Error saving: %v\n", err)
 		return
 	}
 	proxy.Sync()
-	fmt.Printf("Successfully saved Claude Web account to pool as %s!\n", id)
+	fmt.Printf("Saved Claude Web as %s.\n", id)
 }
 
-func loginGemini(model string) {
-	fmt.Println("== Login: Google AI Studio (Gemini) ==")
-	key := readLinePrompt("Enter Google AI Studio API Key (or press Enter to read from $GOOGLE_AI_STUDIO_KEY): ")
+func loginGemini(f loginFlags) {
+	fmt.Println("== Login: Gemini (AI Studio API key) ==")
+
+	key := strings.TrimSpace(f.token)
+	if key == "" && !f.noBrowser {
+		// Gemini needs an API key; open AI Studio so user can copy one.
+		// (Cookie alone cannot call generativelanguage.googleapis.com.)
+		fmt.Println("Opening AI Studio — create/copy an API key, then paste it below.")
+		_ = exec.Command("open", "https://aistudio.google.com/apikey").Start()
+	}
+	if key == "" {
+		key = readLinePrompt("Paste Google AI Studio API key (Enter = $GOOGLE_AI_STUDIO_KEY): ")
+	}
 	if key == "" {
 		key = "env:GOOGLE_AI_STUDIO_KEY"
 	}
 
 	id, priorityFloor, multi := nextPoolID(provider.PoolIDPrefix("gemini"))
-	priority := 2
+	priority := provider.PriorityAPIGemini
 	if multi {
 		priority = priorityFloor
 	}
-
+	model := f.model
 	if model == "" {
-		model = "gemini-2.0-flash"
+		model = "gemini-3.6-flash"
 	}
 	err := provider.AddOrUpdateProvider(provider.DefaultAccountsPath(), provider.ProviderConfig{
 		ID:       id,
@@ -184,28 +333,30 @@ func loginGemini(model string) {
 		Priority: priority,
 		APIKey:   key,
 		Model:    model,
+		Cookies:  f.cookie,
 	})
 	if err != nil {
-		fmt.Printf("Error saving configuration: %v\n", err)
+		fmt.Printf("Error saving: %v\n", err)
 		return
 	}
 	proxy.Sync()
-	fmt.Printf("Successfully saved Google AI Studio account to pool as %s!\n", id)
+	fmt.Printf("Saved Gemini as %s.\n", id)
 }
 
-func loginGitHubModels() {
+func loginGitHubModels(f loginFlags) {
 	fmt.Println("== Login: GitHub Models ==")
-	tok := readLinePrompt("Enter GitHub Personal Access Token (or press Enter to read from $GITHUB_MODELS_TOKEN): ")
+	tok := strings.TrimSpace(f.token)
+	if tok == "" {
+		tok = readLinePrompt("GitHub PAT (Enter = $GITHUB_MODELS_TOKEN): ")
+	}
 	if tok == "" {
 		tok = "env:GITHUB_MODELS_TOKEN"
 	}
-
 	id, priorityFloor, multi := nextPoolID("githubapi")
-	priority := 1
+	priority := provider.PriorityAPIGitHub
 	if multi {
 		priority = priorityFloor
 	}
-
 	err := provider.AddOrUpdateProvider(provider.DefaultAccountsPath(), provider.ProviderConfig{
 		ID:       id,
 		Type:     "openai_compatible",
@@ -215,26 +366,27 @@ func loginGitHubModels() {
 		Model:    "gpt-4o",
 	})
 	if err != nil {
-		fmt.Printf("Error saving configuration: %v\n", err)
+		fmt.Printf("Error: %v\n", err)
 		return
 	}
 	proxy.Sync()
-	fmt.Printf("Successfully saved GitHub Models account to pool as %s!\n", id)
+	fmt.Printf("Saved GitHub Models as %s.\n", id)
 }
 
-func loginGroq() {
+func loginGroq(f loginFlags) {
 	fmt.Println("== Login: Groq ==")
-	key := readLinePrompt("Enter Groq API Key (or press Enter to read from $GROQ_API_KEY): ")
+	key := strings.TrimSpace(f.token)
+	if key == "" {
+		key = readLinePrompt("Groq API key (Enter = $GROQ_API_KEY): ")
+	}
 	if key == "" {
 		key = "env:GROQ_API_KEY"
 	}
-
 	id, priorityFloor, multi := nextPoolID("groqapi")
-	priority := 3
+	priority := provider.PriorityAPIGroq
 	if multi {
 		priority = priorityFloor
 	}
-
 	err := provider.AddOrUpdateProvider(provider.DefaultAccountsPath(), provider.ProviderConfig{
 		ID:       id,
 		Type:     "openai_compatible",
@@ -244,11 +396,62 @@ func loginGroq() {
 		Model:    "llama-3.3-70b-versatile",
 	})
 	if err != nil {
-		fmt.Printf("Error saving configuration: %v\n", err)
+		fmt.Printf("Error: %v\n", err)
 		return
 	}
 	proxy.Sync()
-	fmt.Printf("Successfully saved Groq account to pool as %s!\n", id)
+	fmt.Printf("Saved Groq as %s.\n", id)
+}
+
+// CmdDoctorProviders live-probes every pool adapter with a tiny chat turn and
+// prints OK/FAIL. Used to answer "does chatgpt/gemini/ddg/api actually work?".
+func CmdDoctorProviders() {
+	adapters, err := provider.LoadAccounts(provider.DefaultAccountsPath())
+	if err != nil {
+		fmt.Printf("load accounts: %v\n", err)
+		return
+	}
+	if len(adapters) == 0 {
+		fmt.Println("No providers in pool. Try: am login chatgpt|claude|gemini")
+		return
+	}
+	fmt.Println("=== am doctor providers (live 1-turn probe) ===")
+	req := &types.ChatRequest{
+		Model:    "default",
+		Messages: []types.ChatMessage{{Role: "user", Content: "Reply with exactly: OK"}},
+	}
+	for _, a := range adapters {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		ch, err := a.SendMessageStream(ctx, req)
+		if err != nil {
+			cancel()
+			fmt.Printf("FAIL  %-16s  %v\n", a.ID(), err)
+			continue
+		}
+		var got strings.Builder
+		var streamErr error
+		for chunk := range ch {
+			if chunk.Error != nil {
+				streamErr = chunk.Error
+				break
+			}
+			got.WriteString(chunk.Content)
+		}
+		cancel()
+		if streamErr != nil {
+			fmt.Printf("FAIL  %-16s  %v\n", a.ID(), streamErr)
+			continue
+		}
+		preview := strings.ReplaceAll(strings.TrimSpace(got.String()), "\n", " ")
+		if len(preview) > 60 {
+			preview = preview[:60] + "…"
+		}
+		if preview == "" {
+			fmt.Printf("FAIL  %-16s  empty reply\n", a.ID())
+			continue
+		}
+		fmt.Printf("OK    %-16s  %q\n", a.ID(), preview)
+	}
 }
 
 // CmdAccounts lists all multi-provider pool accounts, sorted by priority
@@ -260,10 +463,6 @@ func CmdAccounts() {
 		rows = append(rows, file.Providers...)
 	}
 
-	// Auto-surface the Codex CLI token-reuse adapter (see
-	// provider.CodexAutoRow) even when it has no real accounts.json entry
-	// yet — it appears the moment `am add codex` has a live login, no
-	// separate `am login codex` step needed.
 	hasCodexRow := false
 	for _, p := range rows {
 		if p.Type == "codex_cli" {
@@ -273,22 +472,6 @@ func CmdAccounts() {
 	}
 	if !hasCodexRow {
 		if row, ok := provider.CodexAutoRow(rows); ok {
-			rows = append(rows, row)
-		}
-	}
-
-	// Same idea for the auto-surfaced DuckDuckGo fallback (see
-	// provider.DuckDuckGoAutoRow) — it has no real accounts.json entry
-	// either, unless the user has explicitly configured or disabled it.
-	hasDuckDuckGoRow := false
-	for _, p := range rows {
-		if p.Type == "duckduckgo" {
-			hasDuckDuckGoRow = true
-			break
-		}
-	}
-	if !hasDuckDuckGoRow {
-		if row, ok := provider.DuckDuckGoAutoRow(rows); ok {
 			rows = append(rows, row)
 		}
 	}
@@ -319,10 +502,6 @@ func CmdAccounts() {
 			if provider.ResolveSecret(p.SessionKey) != "" {
 				authSet = "Yes (Session Key)"
 			}
-		case "duckduckgo":
-			if p.Enabled != nil && *p.Enabled {
-				authSet = "Yes (Enabled)"
-			}
 		case "codex_cli":
 			authSet = "Yes (reused from `am add codex`)"
 		}
@@ -337,9 +516,7 @@ func CmdAccounts() {
 	w.Flush()
 }
 
-// CmdAccountsCmd handles `am accounts [priority <id> <N>]`. With no args it
-// prints today's table (CmdAccounts). `priority <id> <N>` sets one
-// provider's priority and hot-reloads the running proxy, if any.
+// CmdAccountsCmd handles `am accounts [priority <id> <N>]`.
 func CmdAccountsCmd(args []string) {
 	if len(args) == 0 {
 		CmdAccounts()
@@ -347,6 +524,20 @@ func CmdAccountsCmd(args []string) {
 	}
 
 	switch args[0] {
+	case "ls", "list":
+		CmdAccounts()
+	case "rm", "delete", "remove":
+		if len(args) < 2 {
+			fmt.Println("Usage: amux accounts rm <id>")
+			fmt.Println("   or: amux api rm <id>")
+			return
+		}
+		if err := provider.RemoveProvider(provider.DefaultAccountsPath(), args[1]); err != nil {
+			fmt.Printf("Error removing provider: %v\n", err)
+			return
+		}
+		proxy.Sync()
+		fmt.Printf("Removed provider %q from pool\n", args[1])
 	case "priority":
 		if len(args) < 3 {
 			fmt.Println("Usage: amux accounts priority <id> <N>")
@@ -375,7 +566,7 @@ func CmdAccountsCmd(args []string) {
 		proxy.Sync()
 		fmt.Printf("set %s model to %s\n", args[1], args[2])
 	default:
-		fmt.Println("Usage: amux accounts [priority <id> <N> | model <id> <model>]")
+		fmt.Println("Usage: amux accounts [ls | rm <id> | priority <id> <N> | model <id> <model>]")
 	}
 }
 
@@ -405,7 +596,7 @@ func CmdAPI(args []string) {
 		endpoint := ""
 		apiKey := ""
 		model := "default"
-		priority := 10
+		priority := provider.PriorityAPICustom
 
 		for i := 1; i < len(args); i++ {
 			switch args[i] {

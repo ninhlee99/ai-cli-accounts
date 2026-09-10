@@ -81,24 +81,28 @@ func CmdStatus() {
 	}
 
 	for _, a := range s.Accounts {
-		mark := "  "
 		state := "idle"
+		serving := false
 		if a.Active {
-			mark = "> "
 			state = "active"
+			// Claude OAuth account only serves when proxy mode is claude
+			// (not when traffic is pinned to a pool provider).
+			serving = s.Mode != "provider" && !a.Dead
 		}
 		if a.Dead {
 			state = "dead"
+			serving = false
 		} else if a.Cooldown != "" {
 			if t, e := time.Parse(time.RFC3339, a.Cooldown); e == nil && time.Now().Before(t) {
 				state = "cooldown"
+				serving = false
 			}
 		}
 		acctName := a.Account
 		if acctName == "" {
 			acctName = a.Profile
 		}
-		line := fmt.Sprintf("%s%-8s  %s", mark, state, acctName)
+		line := fmt.Sprintf("%s %-8s  %s", statusDot(a.Active, serving), state, acctName)
 		if a.Cooldown != "" {
 			if t, e := time.Parse(time.RFC3339, a.Cooldown); e == nil {
 				line += "   (cooldown until " + t.Local().Format("15:04") + ")"
@@ -135,19 +139,29 @@ func CmdStatus() {
 			id, _ := p["id"].(string)
 			cooling, _ := p["cooling"].(bool)
 			preferred, _ := p["preferred"].(bool)
+			lastUsed, _ := p["last_used"].(bool)
 			prio, _ := p["priority"].(float64)
 
-			mark := "  "
 			state := "idle"
+			serving := false
 			if preferred {
-				mark = "> "
 				state = "active"
+			}
+			// Green only if this adapter actually served the last request
+			// while mode=provider — preferred alone can lie after failover.
+			if s.Mode == "provider" && lastUsed && !cooling {
+				serving = true
+				state = "active"
+			} else if preferred && s.Mode == "provider" && !cooling && !anyLastUsed(s.Pool) {
+				// No request yet this run — preferred is the pending pin.
+				serving = true
 			}
 			if cooling {
 				state = "cooldown"
+				serving = false
 			}
 
-			line := fmt.Sprintf("%s%-8s  prio %-2.0f  %s", mark, state, prio, id)
+			line := fmt.Sprintf("%s %-8s  prio %-2.0f  %s", statusDot(preferred || lastUsed, serving), state, prio, id)
 			if cooling {
 				if cdUntil, ok := p["cooldown_until"].(string); ok && cdUntil != "" {
 					if t, e := time.Parse(time.RFC3339, cdUntil); e == nil {
@@ -157,6 +171,29 @@ func CmdStatus() {
 			}
 			fmt.Println(line)
 		}
+	}
+}
+
+func anyLastUsed(pool []map[string]any) bool {
+	for _, p := range pool {
+		if last, _ := p["last_used"].(bool); last {
+			return true
+		}
+	}
+	return false
+}
+
+// statusDot mirrors proxy up/down dots: green ● when this row is the one
+// actually serving traffic; gray ○ when marked active/preferred but idle
+// in the current mode; two spaces when neither.
+func statusDot(selected, serving bool) string {
+	switch {
+	case serving:
+		return dotGreen
+	case selected:
+		return dotGray
+	default:
+		return " "
 	}
 }
 
