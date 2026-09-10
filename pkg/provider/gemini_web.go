@@ -73,8 +73,15 @@ func (a *GeminiWebAdapter) SendMessageStream(ctx context.Context, req *types.Cha
 		return nil, err
 	}
 
-	prompt := lastUserPrompt(req.Messages)
+	if req.FullContext {
+		a.resetConversation()
+	}
+	continuing := !req.FullContext && len(a.loadMetadata()) > 0
+	prompt := WebBackendPrompt(req, continuing)
 	meta := a.loadMetadata()
+	if req.FullContext {
+		meta = nil
+	}
 
 	rotated := false
 	for attempt := 0; attempt < 2; attempt++ {
@@ -192,6 +199,9 @@ func (a *GeminiWebAdapter) resetConversation() {
 		ClearMetadata: true,
 	})
 }
+
+// ResetConversation clears the server-side Gemini thread (provider handoff).
+func (a *GeminiWebAdapter) ResetConversation() { a.resetConversation() }
 
 func (a *GeminiWebAdapter) streamGenerate(ctx context.Context, prompt string, metadata []string) (text string, newMeta []string, err error) {
 	a.mu.Lock()

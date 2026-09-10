@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -212,6 +213,10 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 		name := r.URL.Query().Get("to")
 		chatPool.SetPreferred(name)
 		toolPool.SetPreferred(name)
+		// Drop stale web threads so the next Claude Code / Codex turn
+		// flattens full client history into a fresh chat (context handoff).
+		chatPool.ResetConversations()
+		toolPool.ResetConversations()
 		mode.Set("provider")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"active": name, "mode": "provider"})
@@ -288,13 +293,39 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 		}
 
 		// Anthropic messages (/v1/messages) — Claude Code / tool clients.
+		//
+		// Same model as attaching an API key to Claude Code:
+		//   ANTHROPIC_BASE_URL → this proxy
+		//   Claude Code owns tools; upstream must speak native tool_use.
+		// When a Claude OAuth account is usable and the request includes
+		// tools[], reverse-proxy to Anthropic (ignore provider/web mode).
+		// Web/pool is chat failover or tool-less traffic only.
 		if strings.HasSuffix(path, "/messages") {
-			hasAPIKey := r.Header.Get("X-Api-Key") != "" || os.Getenv("ANTHROPIC_API_KEY") != ""
+			body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
+			if err != nil {
+				http.Error(w, "read request body: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+
+			hasTools := anthropicRequestHasTools(body)
+			hasAPIKey := r.Header.Get("X-Api-Key") != "" ||
+				strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") ||
+				os.Getenv("ANTHROPIC_API_KEY") != ""
+
+			claudeUsable := !rot.ShouldFailoverToProviderPool() &&
+				(rot.Token() != "" || rot.ProfileCount() > 0)
 
 			usePool := false
 			pool := toolPool
 			autoFromClaude := false
 			switch {
+			case hasTools && claudeUsable:
+				// API-key style agent loop — native Anthropic tool_use.
+				if rot.ProfileCount() > 0 {
+					rot.EnsureUsableActive()
+				}
+				usePool = false
 			case mode.Get() == "provider":
 				usePool = true
 			case hasAPIKey:
@@ -315,17 +346,10 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 			}
 
 			if usePool {
-				body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
-				if err != nil {
-					http.Error(w, "read request body: "+err.Error(), http.StatusBadRequest)
-					return
-				}
 				if err := bridge.HandleClaudeMessages(w, r, pool, body); err != nil {
 					log.Printf("bridge /v1/messages error: %v", err)
 					return
 				}
-				// Claude→pool auto-failover: flip mode + preferred so status
-				// shows the provider that actually answered (● active).
 				if autoFromClaude {
 					if id := pool.LastUsed(); id != "" {
 						pool.SetPreferred(id)
@@ -342,4 +366,16 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 
 		rp.ServeHTTP(w, r)
 	})
+}
+
+// anthropicRequestHasTools reports whether a /v1/messages body includes a
+// non-empty tools array (Claude Code agent requests).
+func anthropicRequestHasTools(body []byte) bool {
+	var wrap struct {
+		Tools []json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(body, &wrap); err != nil {
+		return false
+	}
+	return len(wrap.Tools) > 0
 }

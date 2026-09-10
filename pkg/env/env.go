@@ -35,18 +35,19 @@ func ShellQuote(s string) string {
 
 // PrintEnvExports outputs shell export lines for eval "$(am env)".
 //
-// ANTHROPIC_BASE_URL is only exported when the proxy is actually reachable
-// right now. It used to also fire whenever the user merely had a saved
-// claude profile (hasProfiles), regardless of whether the daemon was up —
-// so a plain new shell opened while the proxy was down (its normal resting
-// state between Claude Code sessions, see `am hook status`) still pointed
-// ANTHROPIC_BASE_URL at a dead port instead of falling through to the real
-// Anthropic API. hasProfiles is kept as a parameter (unused for the
-// override decision) so callers don't need to change; it's still useful
-// context for future auto-start behavior.
+// When the proxy is up, exports the same pair Claude Code expects for a
+// custom Anthropic gateway / API-key style setup:
+//
+//	ANTHROPIC_BASE_URL   → local proxy (instead of api.anthropic.com)
+//	ANTHROPIC_AUTH_TOKEN → dummy gateway credential (Authorization: Bearer)
+//
+// Claude Code keeps owning tools (Bash/Read/…); the proxy only serves
+// /v1/messages like Anthropic. ANTHROPIC_BASE_URL is omitted when the
+// proxy is down so a new shell falls through to the real API.
 func PrintEnvExports(proxyUp bool, hasProfiles bool, proxyBase string) {
 	if proxyUp {
 		fmt.Printf("export ANTHROPIC_BASE_URL=%s\n", proxyBase)
+		fmt.Printf("export ANTHROPIC_AUTH_TOKEN=am-proxy\n")
 	}
 	m := LoadEnvVars()
 	names := make([]string, 0, len(m))
@@ -55,6 +56,13 @@ func PrintEnvExports(proxyUp bool, hasProfiles bool, proxyBase string) {
 	}
 	sort.Strings(names)
 	for _, k := range names {
+		// Don't override the gateway token we just set for the live proxy.
+		if proxyUp && k == "ANTHROPIC_AUTH_TOKEN" {
+			continue
+		}
+		if proxyUp && k == "ANTHROPIC_BASE_URL" {
+			continue
+		}
 		fmt.Printf("export %s=%s\n", k, ShellQuote(m[k]))
 	}
 }

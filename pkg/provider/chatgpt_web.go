@@ -124,14 +124,15 @@ func (a *ChatGPTWebAdapter) SendMessageStream(ctx context.Context, req *types.Ch
 	parentID := a.parentMessageID
 	a.mu.Unlock()
 
-	// Continuing a server-side thread: send only the latest user turn.
-	// Fresh thread: flatten history once into the first message.
-	var prompt string
-	if convID != "" && parentID != "" {
-		prompt = lastUserPrompt(req.Messages)
-	} else {
-		prompt = BuildConcatenatedPrompt(req.Messages)
+	if req.FullContext {
+		a.resetConversation()
+		convID = ""
+		parentID = ""
 	}
+
+	// Continuing a server-side thread: send only the latest user turn.
+	// Fresh thread / FullContext: flatten history once into the first message.
+	prompt := WebBackendPrompt(req, convID != "" && parentID != "")
 	if parentID == "" {
 		parentID = nilParentMessageID
 	}
@@ -215,6 +216,9 @@ func (a *ChatGPTWebAdapter) resetConversation() {
 	})
 	log.Printf("%s: cleared ChatGPT conversation (will open a new thread next turn)", a.AdapterID)
 }
+
+// ResetConversation clears the server-side ChatGPT thread (provider handoff).
+func (a *ChatGPTWebAdapter) ResetConversation() { a.resetConversation() }
 
 func (a *ChatGPTWebAdapter) persistConversation(convID, parentID string) {
 	a.mu.Lock()

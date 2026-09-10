@@ -292,6 +292,83 @@ func TestHandler_AllClaudeCoolingFailsOverToPool(t *testing.T) {
 	}
 }
 
+// Claude Code agent request (tools[]) + usable OAuth → Anthropic reverse
+// proxy even when mode=provider (API-key style; web cannot emit tool_use).
+func TestHandler_MessagesWithToolsUsesClaudeWhenUsable(t *testing.T) {
+	rot := &Rotator{
+		tool:           "claude",
+		order:          []string{"a"},
+		tokens:         map[string]*types.Token{"a": {Access: "tok"}},
+		accounts:       map[string]string{},
+		cooldown:       map[string]time.Time{},
+		dead:           map[string]bool{},
+		autoSwitches:   map[string]int{},
+		manualSwitches: map[string]int{},
+		usedThreshold:  DefaultUsedThreshold,
+	}
+	t.Setenv("AM_HOME", t.TempDir())
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	life := NewLifecycle()
+	mode := &ProxyMode{}
+	mode.Set("provider")
+	pool := router.NewAccountPoolRouter([]types.ProviderAdapter{&stubAdapter{id: "stub"}})
+	rp := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "reverse-proxy", http.StatusTeapot)
+	})
+	sw := &swappableHandler{}
+	h := newHandler(rot, life, mode, pool, pool, rp, "https://api.anthropic.com", sw, func() {})
+	sw.Set(h)
+
+	body := `{"model":"claude-sonnet-4-20250514","tools":[{"name":"Bash","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer am-proxy")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTeapot {
+		t.Fatalf("expected Anthropic reverse-proxy for tools request, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Provider mode + no tools → pool (chat-style), even if Claude is usable.
+func TestHandler_MessagesProviderModeNoToolsUsesPool(t *testing.T) {
+	rot := &Rotator{
+		tool:           "claude",
+		order:          []string{"a"},
+		tokens:         map[string]*types.Token{"a": {Access: "tok"}},
+		accounts:       map[string]string{},
+		cooldown:       map[string]time.Time{},
+		dead:           map[string]bool{},
+		autoSwitches:   map[string]int{},
+		manualSwitches: map[string]int{},
+		usedThreshold:  DefaultUsedThreshold,
+	}
+	t.Setenv("AM_HOME", t.TempDir())
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	life := NewLifecycle()
+	mode := &ProxyMode{}
+	mode.Set("provider")
+	pool := router.NewAccountPoolRouter([]types.ProviderAdapter{&stubAdapter{id: "stub"}})
+	rp := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "reverse-proxy", http.StatusTeapot)
+	})
+	sw := &swappableHandler{}
+	h := newHandler(rot, life, mode, pool, pool, rp, "https://api.anthropic.com", sw, func() {})
+	sw.Set(h)
+
+	body := `{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code == http.StatusTeapot {
+		t.Fatal("expected pool for tool-less provider-mode request")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from pool, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // Exhausted Claude with empty tool pool → stay on Anthropic reverse-proxy.
 func TestHandler_ClaudeFailoverEmptyPoolUsesReverseProxy(t *testing.T) {
 	t.Setenv("AM_HOME", t.TempDir())

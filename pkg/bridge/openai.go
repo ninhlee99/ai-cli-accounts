@@ -31,6 +31,8 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request, pool *router.
 		http.Error(w, fmt.Sprintf("invalid json: %v", err), http.StatusBadRequest)
 		return
 	}
+	// Codex / OpenAI-shaped agents resend history; web must see full context.
+	req.FullContext = true
 
 	ctx := r.Context()
 	stream, err := pool.Send(ctx, &req)

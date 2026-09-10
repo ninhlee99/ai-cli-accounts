@@ -112,7 +112,15 @@ func (a *ClaudeWebAdapter) SendMessageStream(ctx context.Context, req *types.Cha
 	}
 
 	model := a.model()
-	prompt := lastUserPrompt(req.Messages)
+	a.mu.Lock()
+	hasThread := a.convUUID != ""
+	a.mu.Unlock()
+	if req.FullContext {
+		// Stateless API mode: don't mix an old Claude.ai thread with Claude Code history.
+		a.resetConversation()
+		hasThread = false
+	}
+	prompt := WebBackendPrompt(req, hasThread && !req.FullContext)
 
 	payloadMap := map[string]any{
 		"prompt":      prompt,
@@ -242,6 +250,9 @@ func (a *ClaudeWebAdapter) resetConversation() {
 	a.persistConversationLocked()
 	a.mu.Unlock()
 }
+
+// ResetConversation clears the server-side Claude.ai thread (provider handoff).
+func (a *ClaudeWebAdapter) ResetConversation() { a.resetConversation() }
 
 // persistConversationLocked writes org/conv to accounts.json. Caller holds a.mu.
 func (a *ClaudeWebAdapter) persistConversationLocked() {

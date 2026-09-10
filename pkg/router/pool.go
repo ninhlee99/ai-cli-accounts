@@ -48,6 +48,27 @@ func (r *AccountPoolRouter) SetPreferred(id string) {
 	r.preferred = id
 }
 
+// ConversationResetter is implemented by web adapters that keep a
+// server-side chat thread. Called on `am sw` so the next turn does not
+// continue an unrelated conversation.
+type ConversationResetter interface {
+	ResetConversation()
+}
+
+// ResetConversations clears server-side web threads on every adapter that
+// supports it (Claude/ChatGPT/Gemini web). Safe to call when switching
+// providers so Claude Code history is not mixed with an old UI chat.
+func (r *AccountPoolRouter) ResetConversations() {
+	r.mu.RLock()
+	adapters := append([]types.ProviderAdapter(nil), r.adapters...)
+	r.mu.RUnlock()
+	for _, a := range adapters {
+		if rr, ok := a.(ConversationResetter); ok {
+			rr.ResetConversation()
+		}
+	}
+}
+
 // Preferred returns the currently preferred adapter ID.
 func (r *AccountPoolRouter) Preferred() string {
 	r.mu.RLock()

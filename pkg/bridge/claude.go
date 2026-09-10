@@ -46,6 +46,9 @@ func ToChatRequest(body []byte) (*types.ChatRequest, error) {
 		Stream:      aReq.Stream,
 		Temperature: aReq.Temperature,
 		Messages:    []types.ChatMessage{},
+		// Claude Code always resends the full transcript; web backends
+		// must flatten it or the model only sees the last user line.
+		FullContext: true,
 	}
 
 	// 1. Parse system message if present
@@ -83,30 +86,102 @@ func ToChatRequest(body []byte) (*types.ChatRequest, error) {
 			continue
 		}
 
-		var strContent string
-		if err := json.Unmarshal(m.Content, &strContent); err == nil {
-			req.Messages = append(req.Messages, types.ChatMessage{Role: m.Role, Content: strContent})
+		content := flattenAnthropicContent(m.Content)
+		if content == "" && m.Role == "" {
 			continue
 		}
-
-		// Content can be an array of blocks: [{"type": "text", "text": "..."}]
-		var blocks []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		}
-		if err := json.Unmarshal(m.Content, &blocks); err == nil {
-			var sb strings.Builder
-			for _, b := range blocks {
-				if b.Text != "" {
-					sb.WriteString(b.Text)
-					sb.WriteString("\n")
-				}
-			}
-			req.Messages = append(req.Messages, types.ChatMessage{Role: m.Role, Content: strings.TrimSpace(sb.String())})
-		}
+		req.Messages = append(req.Messages, types.ChatMessage{Role: m.Role, Content: content})
 	}
 
 	return req, nil
+}
+
+// flattenAnthropicContent turns Anthropic content (string or blocks) into
+// plain text for web backends. tool_use / tool_result become readable
+// context — not tool emulation; the CLI still owns real tools.
+func flattenAnthropicContent(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var blocks []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return strings.TrimSpace(string(raw))
+	}
+	var sb strings.Builder
+	for _, b := range blocks {
+		var typ string
+		_ = json.Unmarshal(b["type"], &typ)
+		switch typ {
+		case "text":
+			var text string
+			_ = json.Unmarshal(b["text"], &text)
+			if text != "" {
+				if sb.Len() > 0 {
+					sb.WriteByte('\n')
+				}
+				sb.WriteString(text)
+			}
+		case "tool_use":
+			var name, id string
+			_ = json.Unmarshal(b["name"], &name)
+			_ = json.Unmarshal(b["id"], &id)
+			input := b["input"]
+			if sb.Len() > 0 {
+				sb.WriteByte('\n')
+			}
+			sb.WriteString("[Prior tool call")
+			if name != "" {
+				sb.WriteString(": ")
+				sb.WriteString(name)
+			}
+			if id != "" {
+				sb.WriteString(" id=")
+				sb.WriteString(id)
+			}
+			sb.WriteString("]\n")
+			if len(input) > 0 && string(input) != "null" {
+				sb.WriteString(truncateRunes(string(input), 2000))
+			}
+		case "tool_result":
+			var toolUseID string
+			_ = json.Unmarshal(b["tool_use_id"], &toolUseID)
+			if sb.Len() > 0 {
+				sb.WriteByte('\n')
+			}
+			sb.WriteString("[Tool result")
+			if toolUseID != "" {
+				sb.WriteString(" for ")
+				sb.WriteString(toolUseID)
+			}
+			sb.WriteString("]\n")
+			sb.WriteString(truncateRunes(toolResultBody(b["content"]), 4000))
+		}
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+func toolResultBody(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	// Nested content blocks
+	return flattenAnthropicContent(raw)
+}
+
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 // HandleClaudeMessages handles an Anthropic /v1/messages HTTP request using the AccountPoolRouter.
