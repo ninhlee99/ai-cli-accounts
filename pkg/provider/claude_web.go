@@ -112,12 +112,6 @@ func (a *ClaudeWebAdapter) SendMessageStream(ctx context.Context, req *types.Cha
 	}
 
 	model := a.model()
-	orgID, convUUID, err := a.ensureConversation(ctx, model)
-	if err != nil {
-		return nil, err
-	}
-
-	// Server keeps thread history; only send the latest user turn.
 	prompt := lastUserPrompt(req.Messages)
 
 	payloadMap := map[string]any{
@@ -132,12 +126,17 @@ func (a *ClaudeWebAdapter) SendMessageStream(ctx context.Context, req *types.Cha
 		return nil, fmt.Errorf("%s: marshal: %w", a.AdapterID, err)
 	}
 
-	chatURL := fmt.Sprintf("%s/%s/completion", fmt.Sprintf(claudeWebConversationBase, orgID), convUUID)
-
-	const maxAttempts = 3
+	const maxAttempts = 4
 	var resp *http.Response
 	refreshedFor429 := false
+	rotatedConv := false
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		orgID, convUUID, err := a.ensureConversation(ctx, model)
+		if err != nil {
+			return nil, err
+		}
+		chatURL := fmt.Sprintf("%s/%s/completion", fmt.Sprintf(claudeWebConversationBase, orgID), convUUID)
+
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, chatURL, bytes.NewReader(b))
 		if err != nil {
 			return nil, fmt.Errorf("%s: new request: %w", a.AdapterID, err)
@@ -149,6 +148,19 @@ func (a *ClaudeWebAdapter) SendMessageStream(ctx context.Context, req *types.Cha
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", a.AdapterID, err)
 		}
+
+		// Stale conversation on disk → drop and open a new thread once.
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+			resp.Body.Close()
+			if !rotatedConv {
+				rotatedConv = true
+				a.resetConversation()
+				log.Printf("%s: conversation gone — starting a new Claude thread", a.AdapterID)
+				continue
+			}
+			return nil, fmt.Errorf("%s: conversation not found after rotate", a.AdapterID)
+		}
+
 		if resp.StatusCode != http.StatusTooManyRequests {
 			break
 		}
@@ -166,20 +178,27 @@ func (a *ClaudeWebAdapter) SendMessageStream(ctx context.Context, req *types.Cha
 				continue
 			}
 		}
-		if retryAfter <= 0 || attempt == maxAttempts-1 {
-			return nil, claudeFreeRateLimitErr(a.AdapterID, body, retryAfter)
+
+		// Plan/bot limit on this thread → open a fresh conversation and retry once.
+		if !rotatedConv {
+			rotatedConv = true
+			a.resetConversation()
+			log.Printf("%s: rate limited on current thread — starting a new Claude conversation", a.AdapterID)
+			if retryAfter > 0 {
+				wait := time.Duration(retryAfter) * time.Second
+				if wait > 2*time.Minute {
+					wait = 2 * time.Minute
+				}
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(wait):
+				}
+			}
+			continue
 		}
-		wait := time.Duration(retryAfter) * time.Second
-		if wait > 2*time.Minute {
-			wait = 2 * time.Minute
-		}
-		log.Printf("%s: rate limited by Claude — Retry-After=%ds, waiting then retry (%d/%d)",
-			a.AdapterID, retryAfter, attempt+1, maxAttempts-1)
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(wait):
-		}
+
+		return nil, claudeFreeRateLimitErr(a.AdapterID, body, retryAfter)
 	}
 
 	if err := a.mapClaudeHTTPError(resp); err != nil {
@@ -191,9 +210,9 @@ func (a *ClaudeWebAdapter) SendMessageStream(ctx context.Context, req *types.Cha
 	return out, nil
 }
 
-// ensureConversation returns a cached org+conversation, creating them once
-// per adapter lifetime. A 404/410 on a later completion can clear the cache
-// via resetConversation.
+// ensureConversation reuses a persisted org+conversation across process
+// restarts. Creates a new Claude thread only when none is cached (or after
+// resetConversation on rate-limit / 404).
 func (a *ClaudeWebAdapter) ensureConversation(ctx context.Context, model string) (orgID, convUUID string, err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -211,6 +230,8 @@ func (a *ClaudeWebAdapter) ensureConversation(ctx context.Context, model string)
 			return "", "", e
 		}
 		a.convUUID = id
+		a.persistConversationLocked()
+		log.Printf("%s: created Claude conversation %s", a.AdapterID, id)
 	}
 	return a.orgID, a.convUUID, nil
 }
@@ -218,7 +239,15 @@ func (a *ClaudeWebAdapter) ensureConversation(ctx context.Context, model string)
 func (a *ClaudeWebAdapter) resetConversation() {
 	a.mu.Lock()
 	a.convUUID = ""
+	a.persistConversationLocked()
 	a.mu.Unlock()
+}
+
+// persistConversationLocked writes org/conv to accounts.json. Caller holds a.mu.
+func (a *ClaudeWebAdapter) persistConversationLocked() {
+	if err := UpdateProviderConversation(DefaultAccountsPath(), a.AdapterID, a.orgID, a.convUUID); err != nil {
+		log.Printf("%s: persist conversation: %v", a.AdapterID, err)
+	}
 }
 
 func lastUserPrompt(messages []types.ChatMessage) string {

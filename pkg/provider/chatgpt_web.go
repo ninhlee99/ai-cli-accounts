@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
+	"sync"
 
 	"amux-accounts/pkg/types"
 )
@@ -23,6 +25,10 @@ type ChatGPTWebAdapter struct {
 	SessionToken string
 	TargetModel  string
 	HTTPClient   *http.Client
+
+	mu              sync.Mutex
+	convID          string
+	parentMessageID string
 }
 
 const chatGPTConversationURL = "https://chatgpt.com/backend-api/conversation"
@@ -34,9 +40,6 @@ func (a *ChatGPTWebAdapter) client() *http.Client {
 	if a.HTTPClient != nil {
 		return a.HTTPClient
 	}
-	// Shared, connection-pooled client instead of allocating a fresh
-	// http.Client (and fresh TCP/TLS connections) per request. See
-	// http_client.go.
 	return defaultHTTPClient
 }
 
@@ -116,9 +119,24 @@ func (a *ChatGPTWebAdapter) SendMessageStream(ctx context.Context, req *types.Ch
 		return nil, fmt.Errorf("%s: sentinel: %w", a.AdapterID, err)
 	}
 
-	combinedPrompt := BuildConcatenatedPrompt(req.Messages)
-	messageID := newUUIDv4()
+	a.mu.Lock()
+	convID := a.convID
+	parentID := a.parentMessageID
+	a.mu.Unlock()
 
+	// Continuing a server-side thread: send only the latest user turn.
+	// Fresh thread: flatten history once into the first message.
+	var prompt string
+	if convID != "" && parentID != "" {
+		prompt = lastUserPrompt(req.Messages)
+	} else {
+		prompt = BuildConcatenatedPrompt(req.Messages)
+	}
+	if parentID == "" {
+		parentID = nilParentMessageID
+	}
+
+	messageID := newUUIDv4()
 	payloadMap := map[string]any{
 		"action": "next",
 		"messages": []map[string]any{
@@ -127,16 +145,19 @@ func (a *ChatGPTWebAdapter) SendMessageStream(ctx context.Context, req *types.Ch
 				"author": map[string]string{"role": "user"},
 				"content": map[string]any{
 					"content_type": "text",
-					"parts":        []string{combinedPrompt},
+					"parts":        []string{prompt},
 				},
 				"metadata": map[string]any{},
 			},
 		},
-		"parent_message_id":             nilParentMessageID,
+		"parent_message_id":             parentID,
 		"model":                         model,
 		"timezone_offset_min":           -420,
 		"history_and_training_disabled": true,
 		"conversation_mode":             map[string]string{"kind": "primary_assistant"},
+	}
+	if convID != "" {
+		payloadMap["conversation_id"] = convID
 	}
 
 	b, err := json.Marshal(payloadMap)
@@ -162,6 +183,7 @@ func (a *ChatGPTWebAdapter) SendMessageStream(ctx context.Context, req *types.Ch
 
 	if resp.StatusCode == http.StatusTooManyRequests {
 		resp.Body.Close()
+		a.resetConversation()
 		return nil, types.ErrRateLimitReached
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
@@ -169,29 +191,55 @@ func (a *ChatGPTWebAdapter) SendMessageStream(ctx context.Context, req *types.Ch
 		return nil, types.ErrAuthentication
 	}
 	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<10))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<10))
 		resp.Body.Close()
-		msg := string(bytes.TrimSpace(b))
-		// 403 "Unusual activity" is anti-bot, not a bad token — surface body.
-		if resp.StatusCode == http.StatusForbidden {
-			return nil, fmt.Errorf("%s: upstream status %d: %s", a.AdapterID, resp.StatusCode, msg)
+		msg := string(bytes.TrimSpace(body))
+		if resp.StatusCode == http.StatusNotFound {
+			a.resetConversation()
 		}
 		return nil, fmt.Errorf("%s: upstream status %d: %s", a.AdapterID, resp.StatusCode, msg)
 	}
 
 	out := make(chan types.StreamChunk)
-	go streamChatGPTWeb(ctx, a.AdapterID, resp, out)
+	go streamChatGPTWeb(ctx, a, resp, out)
 	return out, nil
 }
 
-func streamChatGPTWeb(ctx context.Context, id string, resp *http.Response, out chan<- types.StreamChunk) {
+func (a *ChatGPTWebAdapter) resetConversation() {
+	a.mu.Lock()
+	a.convID = ""
+	a.parentMessageID = ""
+	a.mu.Unlock()
+	_ = UpdateProviderChatState(DefaultAccountsPath(), a.AdapterID, ChatState{
+		ClearParent: true,
+	})
+	log.Printf("%s: cleared ChatGPT conversation (will open a new thread next turn)", a.AdapterID)
+}
+
+func (a *ChatGPTWebAdapter) persistConversation(convID, parentID string) {
+	a.mu.Lock()
+	a.convID = convID
+	a.parentMessageID = parentID
+	a.mu.Unlock()
+	if err := UpdateProviderChatState(DefaultAccountsPath(), a.AdapterID, ChatState{
+		ConversationID:  convID,
+		ParentMessageID: parentID,
+		ClearParent:     parentID == "",
+	}); err != nil {
+		log.Printf("%s: persist conversation: %v", a.AdapterID, err)
+	}
+}
+
+func streamChatGPTWeb(ctx context.Context, a *ChatGPTWebAdapter, resp *http.Response, out chan<- types.StreamChunk) {
 	defer close(out)
 	defer resp.Body.Close()
 
+	id := a.AdapterID
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 64*1024), 2<<20)
 
 	var lastText string
+	var convID, msgID string
 	doneSent := false
 	for sc.Scan() {
 		line := sc.Text()
@@ -203,13 +251,18 @@ func streamChatGPTWeb(ctx context.Context, id string, resp *http.Response, out c
 			continue
 		}
 		if payload == "[DONE]" {
+			if convID != "" && msgID != "" {
+				a.persistConversation(convID, msgID)
+			}
 			sendChunk(ctx, out, types.StreamChunk{ID: id, Done: true})
 			doneSent = true
 			return
 		}
 
 		var chunk struct {
-			Message struct {
+			ConversationID string `json:"conversation_id"`
+			Message        struct {
+				ID     string `json:"id"`
 				Author struct {
 					Role string `json:"role"`
 				} `json:"author"`
@@ -229,15 +282,19 @@ func streamChatGPTWeb(ctx context.Context, id string, resp *http.Response, out c
 			doneSent = true
 			return
 		}
+		if chunk.ConversationID != "" {
+			convID = chunk.ConversationID
+		}
 
 		if chunk.Message.Author.Role != "" && !strings.EqualFold(chunk.Message.Author.Role, "assistant") {
 			continue
 		}
-		// Skip non-text assistant payloads (reasoning_recap, etc.) — their
-		// finished_successfully must not end the stream before real text arrives.
 		ctype := chunk.Message.Content.ContentType
 		if ctype != "" && ctype != "text" {
 			continue
+		}
+		if chunk.Message.ID != "" {
+			msgID = chunk.Message.ID
 		}
 
 		if len(chunk.Message.Content.Parts) > 0 {
@@ -259,6 +316,9 @@ func streamChatGPTWeb(ctx context.Context, id string, resp *http.Response, out c
 		}
 
 		if chunk.Message.Status == "finished_successfully" && lastText != "" {
+			if convID != "" && msgID != "" {
+				a.persistConversation(convID, msgID)
+			}
 			sendChunk(ctx, out, types.StreamChunk{ID: id, Done: true})
 			doneSent = true
 			return
@@ -267,6 +327,9 @@ func streamChatGPTWeb(ctx context.Context, id string, resp *http.Response, out c
 	if err := sc.Err(); err != nil && ctx.Err() == nil {
 		sendChunk(ctx, out, types.StreamChunk{ID: id, Error: fmt.Errorf("%s: read stream: %w", id, err), Done: true})
 		return
+	}
+	if convID != "" && msgID != "" {
+		a.persistConversation(convID, msgID)
 	}
 	if !doneSent && ctx.Err() == nil {
 		sendChunk(ctx, out, types.StreamChunk{ID: id, Done: true})

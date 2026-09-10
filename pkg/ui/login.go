@@ -73,11 +73,11 @@ func parseLoginFlags(args []string) (providerName string, f loginFlags, rest []s
 func CmdLogin(args []string) {
 	if len(args) == 0 {
 		fmt.Println("Usage: amux login <provider> [--browser] [--token T] [--cookie C] [--refresh R] [--model M]")
-		fmt.Println("Providers: chatgpt, claude, gemini, github, groq")
+		fmt.Println("Providers: chatgpt, claude, gemini, gemini-web, github, groq")
 		fmt.Println()
-		fmt.Println("  chatgpt / claude  default = open browser, you log in, amux captures cookie via CDP")
-		fmt.Println("                    (profile in ~/.am/browser-profiles — no Keychain)")
-		fmt.Println("  --token/--cookie  skip browser, use pasted web credentials")
+		fmt.Println("  chatgpt / claude / gemini-web  default = open browser, CDP cookie capture")
+		fmt.Println("  gemini (API)                   AI Studio API key")
+		fmt.Println("  --token/--cookie  skip browser, use pasted credentials")
 		fmt.Println("  --no-browser      paste interactively instead of opening a window")
 		return
 	}
@@ -88,6 +88,8 @@ func CmdLogin(args []string) {
 		loginChatGPT(flags)
 	case "claude", "claude-web", "claudeweb":
 		loginClaude(flags)
+	case "gemini-web", "geminiweb":
+		loginGeminiWeb(flags)
 	case "gemini", "google-ai-studio", "geminiapi":
 		loginGemini(flags)
 	case "github", "github-models":
@@ -95,7 +97,7 @@ func CmdLogin(args []string) {
 	case "groq":
 		loginGroq(flags)
 	default:
-		fmt.Printf("Unknown provider %q. Supported: chatgpt, claude, gemini, github, groq\n", target)
+		fmt.Printf("Unknown provider %q. Supported: chatgpt, claude, gemini, gemini-web, github, groq\n", target)
 	}
 }
 
@@ -341,6 +343,65 @@ func loginGemini(f loginFlags) {
 	}
 	proxy.Sync()
 	fmt.Printf("Saved Gemini as %s.\n", id)
+}
+
+func loginGeminiWeb(f loginFlags) {
+	fmt.Println("== Login: Gemini Web (gemini.google.com) ==")
+
+	cookieHeader := strings.TrimSpace(f.cookie)
+	key := strings.TrimSpace(f.token)
+	wantBrowser := f.useBrowser || (cookieHeader == "" && key == "" && !f.noBrowser)
+	if wantBrowser {
+		fmt.Println("Opening dedicated browser (CDP capture) — sign in to gemini.google.com…")
+		auth, err := browser.CaptureWebAuthViaBrowser(browser.GeminiWebLogin, 5*time.Minute)
+		if err != nil {
+			fmt.Printf("Browser capture failed: %v\n", err)
+			if f.useBrowser {
+				return
+			}
+			fmt.Println("Falling back to paste…")
+		} else {
+			key = auth.SessionValue
+			cookieHeader = auth.CookieHeader
+			fmt.Println("Captured __Secure-1PSID from browser.")
+			if cookieHeader != "" {
+				fmt.Printf("Captured cookie jar (%d cookies).\n", strings.Count(cookieHeader, "="))
+			}
+		}
+	}
+	if cookieHeader == "" && key == "" {
+		cookieHeader = readLinePrompt("Paste gemini.google.com Cookie header (needs __Secure-1PSID): ")
+	}
+	if key == "" && cookieHeader != "" {
+		key = browser.ParseCookieHeader(cookieHeader, "__Secure-1PSID")
+	}
+	if cookieHeader == "" && key != "" {
+		cookieHeader = "__Secure-1PSID=" + key
+	}
+	if cookieHeader == "" {
+		fmt.Println("Cancelled.")
+		return
+	}
+
+	id, priorityFloor, multi := nextPoolID(provider.PoolIDPrefix("gemini_web"))
+	priority := provider.PriorityWebGemini
+	if multi {
+		priority = priorityFloor
+	}
+	err := provider.AddOrUpdateProvider(provider.DefaultAccountsPath(), provider.ProviderConfig{
+		ID:         id,
+		Type:       "gemini_web",
+		Priority:   priority,
+		SessionKey: key,
+		Cookies:    cookieHeader,
+		Model:      f.model,
+	})
+	if err != nil {
+		fmt.Printf("Error saving: %v\n", err)
+		return
+	}
+	proxy.Sync()
+	fmt.Printf("Saved Gemini Web as %s.\n", id)
 }
 
 func loginGitHubModels(f loginFlags) {

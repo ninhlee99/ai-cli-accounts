@@ -43,7 +43,7 @@ var (
 	}
 	GeminiWebLogin = WebLoginTarget{
 		Name:       "gemini",
-		StartURL:   "https://aistudio.google.com/apikey",
+		StartURL:   "https://gemini.google.com/app",
 		CookieHost: "google.com",
 		CookieName: "__Secure-1PSID",
 		Profile:    "gemini",

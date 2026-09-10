@@ -32,6 +32,15 @@ type ProviderConfig struct {
 
 	// gemini_web / optional raw Cookie header
 	Cookies string `json:"cookies,omitempty"`
+
+	// Claude web: reuse one chat_conversations UUID across am chat / proxy
+	// restarts until rate-limit or 404 forces a new thread.
+	OrgID          string `json:"orgId,omitempty"`
+	ConversationID string `json:"conversationId,omitempty"`
+	// ChatGPT web: last assistant message id (next turn's parent_message_id).
+	ParentMessageID string `json:"parentMessageId,omitempty"`
+	// Gemini web: JSON array of chat.metadata (cid/rid/rcid/…).
+	MetadataJSON string `json:"metadataJson,omitempty"`
 }
 
 // IsConfigured reports whether the provider has valid credentials / configuration.
@@ -46,6 +55,8 @@ func (p ProviderConfig) IsConfigured() bool {
 		return ResolveSecret(p.SessionToken) != ""
 	case "claude_web":
 		return ResolveSecret(p.SessionKey) != ""
+	case "gemini_web":
+		return strings.TrimSpace(p.Cookies) != "" || ResolveSecret(p.SessionKey) != ""
 	}
 	return false
 }
@@ -78,6 +89,7 @@ var poolIDPrefix = map[string]string{
 	"claude_web":  "claudeweb",
 	"chatgpt_web": "chatgptweb",
 	"gemini":      "geminiapi",
+	"gemini_web":  "geminiweb",
 }
 
 // PoolIDPrefix returns the unified-ID prefix for a built-in pool provider
@@ -214,10 +226,12 @@ func BuildAdapter(p ProviderConfig) (types.ProviderAdapter, error) {
 
 	case "chatgpt_web":
 		return &ChatGPTWebAdapter{
-			AdapterID:    p.ID,
-			PriorityLvl:  p.Priority,
-			SessionToken: ResolveSecret(p.SessionToken),
-			TargetModel:  p.Model,
+			AdapterID:       p.ID,
+			PriorityLvl:     p.Priority,
+			SessionToken:    ResolveSecret(p.SessionToken),
+			TargetModel:     p.Model,
+			convID:          p.ConversationID,
+			parentMessageID: p.ParentMessageID,
 		}, nil
 
 	case "claude_web":
@@ -227,6 +241,23 @@ func BuildAdapter(p ProviderConfig) (types.ProviderAdapter, error) {
 			SessionKey:  ResolveSecret(p.SessionKey),
 			Cookies:     p.Cookies,
 			TargetModel: p.Model,
+			orgID:       p.OrgID,
+			convUUID:    p.ConversationID,
+		}, nil
+
+	case "gemini_web":
+		sk := ResolveSecret(p.SessionKey)
+		cookies := p.Cookies
+		if cookies == "" && sk != "" {
+			cookies = "__Secure-1PSID=" + sk
+		}
+		return &GeminiWebAdapter{
+			AdapterID:   p.ID,
+			PriorityLvl: p.Priority,
+			Cookies:     cookies,
+			TargetModel: p.Model,
+			cid:         p.ConversationID,
+			metadataJSON: p.MetadataJSON,
 		}, nil
 
 	default:
@@ -281,6 +312,7 @@ const (
 	PriorityAPIGroq    = 3
 	PriorityAPICustom  = 10
 	PriorityWebChatGPT = 20
+	PriorityWebGemini  = 22
 	PriorityWebClaude  = 25
 	PriorityWebCodex   = 30
 )
@@ -402,6 +434,48 @@ func UpdateProviderCookies(path, id, sessionKey, cookies string) error {
 			f.Providers[i].SessionKey = sessionKey
 		}
 		f.Providers[i].Cookies = cookies
+		return SaveConfigFile(path, f)
+	}
+	return fmt.Errorf("provider %s not found", id)
+}
+
+// UpdateProviderConversation persists Claude web org+conversation IDs so the
+// next process reuses the same thread (empty conv clears → next send creates).
+func UpdateProviderConversation(path, id, orgID, conversationID string) error {
+	return UpdateProviderChatState(path, id, ChatState{
+		OrgID:          orgID,
+		ConversationID: conversationID,
+	})
+}
+
+// ChatState is the persisted multi-turn thread for web providers.
+type ChatState struct {
+	OrgID           string
+	ConversationID  string
+	ParentMessageID string
+	MetadataJSON    string
+	ClearParent     bool // when true, wipe ParentMessageID even if empty
+	ClearMetadata   bool
+}
+
+// UpdateProviderChatState merges conversation continuity fields for web adapters.
+func UpdateProviderChatState(path, id string, st ChatState) error {
+	f, err := LoadConfigFile(path)
+	if err != nil {
+		return err
+	}
+	for i, p := range f.Providers {
+		if p.ID != id {
+			continue
+		}
+		f.Providers[i].OrgID = st.OrgID
+		f.Providers[i].ConversationID = st.ConversationID
+		if st.ParentMessageID != "" || st.ClearParent {
+			f.Providers[i].ParentMessageID = st.ParentMessageID
+		}
+		if st.MetadataJSON != "" || st.ClearMetadata {
+			f.Providers[i].MetadataJSON = st.MetadataJSON
+		}
 		return SaveConfigFile(path, f)
 	}
 	return fmt.Errorf("provider %s not found", id)

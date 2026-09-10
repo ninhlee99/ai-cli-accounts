@@ -54,7 +54,8 @@ Account Profiles:
 Multi-Provider Gateway & Plugins:
   amux login [provider] [--browser] [--token T] [--cookie C] [--refresh R] [--model M]
                             chatgpt/claude: open browser, you log in, amux captures cookie via CDP
-                            (no Keychain). gemini: opens AI Studio for API key paste.
+                            (no Keychain). gemini-web: gemini.google.com cookies.
+                            gemini: opens AI Studio for API key paste.
   amux doctor providers     live 1-turn probe of every pool adapter (OK/FAIL)
   amux accounts               list multi-provider accounts in pool, sorted by priority
   amux accounts rm <id>       remove a pool account (same as: amux api rm)
