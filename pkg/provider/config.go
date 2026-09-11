@@ -18,6 +18,11 @@ type ProviderConfig struct {
 	Priority int    `json:"priority"`
 	Enabled  *bool  `json:"enabled,omitempty"`
 
+	// Account is the signed-in email (or other stable identity). Used to
+	// recognize re-logins of the same person so credentials update in place
+	// under a stable ID like "claude:web:ninhle".
+	Account string `json:"account,omitempty"`
+
 	// openai_compatible & gemini
 	BaseURL string `json:"baseUrl,omitempty"`
 	APIKey  string `json:"apiKey,omitempty"`
@@ -169,6 +174,31 @@ func SetPriority(path, id string, priority int) error {
 		return SaveConfigFile(path, f)
 	}
 
+	return fmt.Errorf("no provider with id %q in pool (see: am accounts)", id)
+}
+
+// SetEnabled turns a pool provider on or off. Disabled providers are skipped
+// by the pool picker (same as Enabled:false in accounts.json).
+func SetEnabled(path, id string, enabled bool) error {
+	f, err := LoadConfigFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if f == nil {
+		return fmt.Errorf("no provider with id %q in pool (see: am accounts)", id)
+	}
+	for i, p := range f.Providers {
+		if p.ID == id {
+			v := enabled
+			f.Providers[i].Enabled = &v
+			return SaveConfigFile(path, f)
+		}
+	}
+	if prefix, _, ok := types.ParseID(id); ok && prefix == "codexcli" {
+		v := enabled
+		f.Providers = append(f.Providers, ProviderConfig{ID: id, Type: "codex_cli", Enabled: &v})
+		return SaveConfigFile(path, f)
+	}
 	return fmt.Errorf("no provider with id %q in pool (see: am accounts)", id)
 }
 

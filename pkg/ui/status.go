@@ -52,6 +52,7 @@ func CmdStatus() {
 			LimitReset     string   `json:"limit_reset"`
 			Cooldown       string   `json:"cooldown_until"`
 			Dead           bool     `json:"dead"`
+			Disabled       bool     `json:"disabled"`
 			FiveHUsed      *float64 `json:"5h_used"`
 			FiveHReset     string   `json:"5h_reset"`
 			SevenDUsed     *float64 `json:"7d_used"`
@@ -92,6 +93,9 @@ func CmdStatus() {
 		if a.Dead {
 			state = "dead"
 			serving = false
+		} else if a.Disabled {
+			state = "off"
+			serving = false
 		} else if a.Cooldown != "" {
 			if t, e := time.Parse(time.RFC3339, a.Cooldown); e == nil && time.Now().Before(t) {
 				state = "cooldown"
@@ -110,6 +114,9 @@ func CmdStatus() {
 		}
 		if a.Dead {
 			line += "   (refresh dead — re-login to restore)"
+		}
+		if a.Disabled {
+			line += "   (off — am on " + a.Profile + ")"
 		}
 		fmt.Println(line)
 		if a.FiveHUsed != nil {

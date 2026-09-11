@@ -253,6 +253,7 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 	mux.HandleFunc("/_am/sync", func(w http.ResponseWriter, r *http.Request) {
 		profile.SyncActiveFromSystem("claude")
 		rot.RefreshFromDisk()
+		rot.EvictDisabledActive()
 		if reloaded, err := provider.LoadAccounts(provider.DefaultAccountsPath()); err == nil {
 			chatPool.Reload(reloaded)
 			if toolPool != chatPool {

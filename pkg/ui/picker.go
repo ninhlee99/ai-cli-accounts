@@ -13,7 +13,13 @@ import (
 
 // PickProfile shows an arrow-key menu of profiles/providers and returns the chosen name.
 func PickProfile(tool string) string {
-	profs := profile.ListProfiles(tool)
+	var profs []types.ProfileMeta
+	for _, p := range profile.ListProfiles(tool) {
+		if p.Disabled {
+			continue // am off — not selectable until am on
+		}
+		profs = append(profs, p)
+	}
 	if tool == "claude" {
 		profs = append(profs, providerMenuEntries()...)
 	}
@@ -113,7 +119,10 @@ func providerMenuEntries() []types.ProfileMeta {
 			if !p.IsConfigured() {
 				continue
 			}
-			detail := p.BaseURL
+			detail := p.Account
+			if detail == "" {
+				detail = p.BaseURL
+			}
 			if detail == "" {
 				detail = p.Model
 			}

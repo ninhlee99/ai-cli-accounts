@@ -432,6 +432,39 @@ func ReadMeta(tool, name string) types.ProfileMeta {
 	return m
 }
 
+// WriteMeta persists profile metadata (name/account/disabled/…).
+func WriteMeta(tool, name string, m types.ProfileMeta) error {
+	m.Name = name
+	m.Tool = tool
+	b, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	return WriteFileAtomic(MetaPath(tool, name), append(b, '\n'), 0o600)
+}
+
+// SetDisabled marks a profile off (true) or on (false). Off profiles are
+// skipped by auto-rotate and rejected by `am sw` until turned back on.
+func SetDisabled(tool, name string, disabled bool) error {
+	m := ReadMeta(tool, name)
+	if m.Name == "" && m.Account == "" && m.Tool == "" {
+		// Empty meta — profile may still exist as .amp only.
+		if _, err := os.Stat(BundlePath(tool, name)); err != nil {
+			return fmt.Errorf("no profile %q for %s", name, tool)
+		}
+		m = types.ProfileMeta{Name: name, Tool: tool}
+	}
+	m.Disabled = disabled
+	m.Name = name
+	m.Tool = tool
+	return WriteMeta(tool, name, m)
+}
+
+// IsDisabled reports whether the named profile is turned off.
+func IsDisabled(tool, name string) bool {
+	return ReadMeta(tool, name).Disabled
+}
+
 func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {

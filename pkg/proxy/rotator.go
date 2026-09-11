@@ -64,6 +64,7 @@ type Rotator struct {
 	accounts map[string]string // profile name -> account email (cached)
 	cooldown map[string]time.Time
 	dead     map[string]bool // profile name -> refresh token confirmed dead; skip in Rotate() until re-login
+	disabled map[string]bool // profile name -> am off; skip rotate + reject am sw until am on
 
 	// usedThreshold: rotate when window utilization >= this (default 0.95).
 	usedThreshold float64
@@ -92,6 +93,7 @@ func (r *Rotator) Load() {
 	r.accounts = map[string]string{}
 	r.cooldown = map[string]time.Time{}
 	r.dead = map[string]bool{}
+	r.disabled = map[string]bool{}
 	r.autoSwitches = map[string]int{}
 	r.manualSwitches = map[string]int{}
 	r.order = nil
@@ -99,6 +101,7 @@ func (r *Rotator) Load() {
 		r.order = append(r.order, p.Name)
 		r.tokens[p.Name] = profile.LoadClaudeToken(r.tool, p.Name)
 		r.accounts[p.Name] = p.Account
+		r.disabled[p.Name] = p.Disabled
 	}
 	if a := profile.ReadActivePointer(r.tool); a != "" {
 		for i, n := range r.order {
@@ -123,6 +126,10 @@ func (r *Rotator) RefreshFromDisk() {
 		known[n] = true
 	}
 	for _, p := range profile.ListProfiles(r.tool) {
+		if r.disabled == nil {
+			r.disabled = map[string]bool{}
+		}
+		r.disabled[p.Name] = p.Disabled
 		if !known[p.Name] {
 			r.order = append(r.order, p.Name)
 			r.tokens[p.Name] = profile.LoadClaudeToken(r.tool, p.Name)
@@ -332,10 +339,9 @@ func (r *Rotator) Observe(resp *http.Response) {
 	}
 }
 
-// AllUnavailable reports whether every saved profile is either in cooldown
-// or marked dead — i.e. Claude reverse-proxy has nowhere useful to go and
-// the gateway should fall over to the free provider pool (ChatGPT / Gemini /
-// Codex) until a window resets.
+// AllUnavailable reports whether every saved profile is either in cooldown,
+// marked dead, or turned off — i.e. Claude reverse-proxy has nowhere useful
+// to go and the gateway should fall over to the free provider pool.
 func (r *Rotator) AllUnavailable() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -344,7 +350,7 @@ func (r *Rotator) AllUnavailable() bool {
 	}
 	now := time.Now()
 	for _, n := range r.order {
-		if r.dead[n] {
+		if r.disabled[n] || r.dead[n] {
 			continue
 		}
 		if cd, ok := r.cooldown[n]; ok && now.Before(cd) {
@@ -382,7 +388,7 @@ func (r *Rotator) EnsureUsableActive() bool {
 	}
 	now := time.Now()
 	usable := func(n string) bool {
-		if r.dead[n] {
+		if r.disabled[n] || r.dead[n] {
 			return false
 		}
 		if cd, ok := r.cooldown[n]; ok && now.Before(cd) {
@@ -498,6 +504,9 @@ func (r *Rotator) Rotate(from, reason string) {
 	n := len(r.order)
 	for step := 1; step <= n; step++ {
 		cand := r.order[(r.idx+step)%n]
+		if r.disabled[cand] {
+			continue // am off — skip until am on
+		}
 		if cd, ok := r.cooldown[cand]; ok && time.Now().Before(cd) {
 			continue
 		}
@@ -545,6 +554,10 @@ func (r *Rotator) ForceSwitch(name string) error {
 		r.mu.Unlock()
 		return fmt.Errorf("no profile %q (have: %s)", name, strings.Join(order, ", "))
 	}
+	if r.disabled[name] {
+		r.mu.Unlock()
+		return fmt.Errorf("profile %q is off — run: am on %s", name, name)
+	}
 	r.idx = found
 	target := r.order[r.idx]
 	delete(r.cooldown, target) // manual switch clears any cooldown on the target
@@ -565,6 +578,26 @@ func (r *Rotator) ForceSwitch(name string) error {
 	}
 	log.Printf("MANUAL SWITCH -> %s", target)
 	return nil
+}
+
+// EvictDisabledActive switches away from the active profile if it was just
+// turned off (`am off`). No-op when active is still enabled.
+func (r *Rotator) EvictDisabledActive() {
+	r.mu.Lock()
+	if len(r.order) == 0 {
+		r.mu.Unlock()
+		return
+	}
+	cur := r.order[r.idx]
+	if !r.disabled[cur] {
+		r.mu.Unlock()
+		return
+	}
+	r.mu.Unlock()
+	if r.EnsureUsableActive() {
+		return
+	}
+	log.Printf("amux: active profile %s is off and no other Claude account is usable", cur)
 }
 
 func (r *Rotator) Status() map[string]any {
@@ -604,6 +637,9 @@ func (r *Rotator) Status() map[string]any {
 		}
 		if r.dead[n] {
 			m["dead"] = true
+		}
+		if r.disabled[n] {
+			m["disabled"] = true
 		}
 		accts = append(accts, m)
 	}

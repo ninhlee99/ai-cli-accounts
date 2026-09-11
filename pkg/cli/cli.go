@@ -48,6 +48,8 @@ Account Profiles:
   amux restore --backup       re-import latest auto-backup
   amux sw                     interactive account & provider picker (↑/↓, Enter)
   amux sw <id|name|provider>  switch to a specific account or LLM provider
+  amux off <id|name>          disable a Claude profile (skip auto-rotate + block am sw)
+  amux on <id|name>           re-enable a Claude profile
   amux current [tool]         print the currently active account on system
   amux status                 proxy state, rate limits (5h/7d), provider pool
 
@@ -59,6 +61,7 @@ Multi-Provider Gateway & Plugins:
   amux doctor providers     live 1-turn probe of every pool adapter (OK/FAIL)
   amux accounts               list multi-provider accounts in pool, sorted by priority
   amux accounts rm <id>       remove a pool account (same as: amux api rm)
+  amux accounts off|on <id>   disable/enable a pool account (skip failover)
   amux accounts priority <id> <N>
                             set a pool account's priority (lower = tried first); hot-reloads
                             a running proxy, no restart needed
@@ -182,8 +185,35 @@ func Run(rawArgs []string) {
 			proxy.CmdSwitchProvider(name)
 		} else {
 			resolved := resolveName(tool, name)
+			if profile.IsDisabled(tool, resolved) {
+				die("profile %q is off — run: am on %s", resolved, resolved)
+			}
 			proxy.CmdSwitch(tool, resolved)
 		}
+
+	case "off", "disable":
+		tool, name := toolAndName(args)
+		if name == "" {
+			die("usage: amux off <id|name>")
+		}
+		resolved := resolveName(tool, name)
+		if err := profile.SetDisabled(tool, resolved, true); err != nil {
+			die("%v", err)
+		}
+		proxy.Sync()
+		fmt.Printf("off %s/%s — auto-rotate and am sw will skip it (am on %s to restore)\n", tool, resolved, resolved)
+
+	case "on", "enable":
+		tool, name := toolAndName(args)
+		if name == "" {
+			die("usage: amux on <id|name>")
+		}
+		resolved := resolveName(tool, name)
+		if err := profile.SetDisabled(tool, resolved, false); err != nil {
+			die("%v", err)
+		}
+		proxy.Sync()
+		fmt.Printf("on %s/%s — available for rotate and am sw again\n", tool, resolved)
 
 	case "status", "st":
 		ui.CmdStatus()
@@ -465,12 +495,12 @@ func cmdLs(args []string) {
 		tools = []string{args[0]}
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tNAME\tACCOUNT\tACTIVE\tSAVED")
+	fmt.Fprintln(w, "ID\tNAME\tACCOUNT\tACTIVE\tOFF\tSAVED")
 	for _, tn := range tools {
 		active := profile.ReadActivePointer(tn)
 		profs := profile.ListProfiles(tn)
 		if len(profs) == 0 {
-			fmt.Fprintf(w, "%s\t(none — am add %s)\t\t\t\n", tn, tn)
+			fmt.Fprintf(w, "%s\t(none — am add %s)\t\t\t\t\n", tn, tn)
 			continue
 		}
 		for _, p := range profs {
@@ -478,7 +508,11 @@ func cmdLs(args []string) {
 			if p.Name == active {
 				mark = "*"
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", p.ID, p.Name, orDash(p.Account), mark, p.Saved.Format("2006-01-02 15:04"))
+			off := ""
+			if p.Disabled {
+				off = "yes"
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", p.ID, p.Name, orDash(p.Account), mark, off, p.Saved.Format("2006-01-02 15:04"))
 		}
 	}
 	w.Flush()

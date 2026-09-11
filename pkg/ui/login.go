@@ -175,6 +175,7 @@ func loginChatGPT(f loginFlags) {
 		}
 	}
 
+	accountEmail := ""
 	if access == "" && sessionCookie != "" {
 		sess, err := browser.FetchChatGPTSession(sessionCookie)
 		if err != nil {
@@ -186,6 +187,7 @@ func loginChatGPT(f loginFlags) {
 			if refresh == "" {
 				refresh = sess.RefreshToken
 			}
+			accountEmail = sess.Email
 			if sess.Email != "" {
 				fmt.Printf("Session OK for %s (expires %s).\n", sess.Email, sess.Expires)
 			} else {
@@ -204,29 +206,18 @@ func loginChatGPT(f loginFlags) {
 		return
 	}
 
-	id, priorityFloor, multi := nextPoolID(provider.PoolIDPrefix("chatgpt_web"))
-	priority := provider.PriorityWebChatGPT
-	if multi {
-		priority = priorityFloor
-	}
-	model := f.model
-	if model == "" {
-		model = "auto"
-	}
-	err := provider.AddOrUpdateProvider(provider.DefaultAccountsPath(), provider.ProviderConfig{
-		ID:           id,
-		Type:         "chatgpt_web",
-		Priority:     priority,
-		SessionToken: access,
-		RefreshToken: refresh,
-		Model:        model,
+	savePoolLogin("chatgpt_web", accountEmail, func(slot provider.PoolSlot) provider.ProviderConfig {
+		return provider.ProviderConfig{
+			ID:           slot.ID,
+			Type:         "chatgpt_web",
+			Priority:     slot.Priority,
+			Enabled:      slot.Enabled,
+			Account:      accountEmail,
+			SessionToken: access,
+			RefreshToken: refresh,
+			Model:        coalesceModel(f.model, "auto"),
+		}
 	})
-	if err != nil {
-		fmt.Printf("Error saving configuration: %v\n", err)
-		return
-	}
-	proxy.Sync()
-	fmt.Printf("Saved ChatGPT Web as %s.\n", id)
 }
 
 func loginClaude(f loginFlags) {
@@ -278,29 +269,55 @@ func loginClaude(f loginFlags) {
 		cookieHeader = f.cookie
 	}
 
-	id, priorityFloor, multi := nextPoolID(provider.PoolIDPrefix("claude_web"))
-	priority := provider.PriorityWebClaude
-	if multi {
-		priority = priorityFloor
+	accountEmail := ""
+	if acct, err := browser.FetchClaudeAccount(key, cookieHeader); err != nil {
+		fmt.Printf("Could not detect account email: %v\n", err)
+		fmt.Println("Continuing without identity — re-login may create a new pool entry.")
+	} else {
+		accountEmail = acct.Email
+		fmt.Printf("Signed in as %s.\n", accountEmail)
 	}
-	model := f.model
-	if model == "" {
-		model = "claude-sonnet-5"
-	}
-	err := provider.AddOrUpdateProvider(provider.DefaultAccountsPath(), provider.ProviderConfig{
-		ID:         id,
-		Type:       "claude_web",
-		Priority:   priority,
-		SessionKey: key,
-		Cookies:    cookieHeader,
-		Model:      model,
+
+	savePoolLogin("claude_web", accountEmail, func(slot provider.PoolSlot) provider.ProviderConfig {
+		return provider.ProviderConfig{
+			ID:         slot.ID,
+			Type:       "claude_web",
+			Priority:   slot.Priority,
+			Enabled:    slot.Enabled,
+			Account:    accountEmail,
+			SessionKey: key,
+			Cookies:    cookieHeader,
+			Model:      coalesceModel(f.model, "claude-sonnet-5"),
+		}
 	})
-	if err != nil {
+}
+
+func coalesceModel(v, fallback string) string {
+	if strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	return v
+}
+
+// savePoolLogin resolves the pool slot (same account → relogin) and persists
+// credentials under a stable identity ID when email is known.
+func savePoolLogin(providerType, accountEmail string, build func(provider.PoolSlot) provider.ProviderConfig) {
+	path := provider.DefaultAccountsPath()
+	slot := provider.ResolvePoolSlot(path, providerType, accountEmail)
+	cfg := build(slot)
+	if err := provider.UpsertPoolProvider(path, cfg, slot.RenameFrom); err != nil {
 		fmt.Printf("Error saving: %v\n", err)
 		return
 	}
 	proxy.Sync()
-	fmt.Printf("Saved Claude Web as %s.\n", id)
+	switch {
+	case slot.Relogin && slot.RenameFrom != "" && slot.RenameFrom != slot.ID:
+		fmt.Printf("Re-logged in %s (was %s).\n", slot.ID, slot.RenameFrom)
+	case slot.Relogin:
+		fmt.Printf("Re-logged in %s.\n", slot.ID)
+	default:
+		fmt.Printf("Saved as %s.\n", slot.ID)
+	}
 }
 
 func loginGemini(f loginFlags) {
@@ -545,8 +562,8 @@ func CmdAccounts() {
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Priority < rows[j].Priority })
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "ID\tTYPE\tPRIORITY\tTARGET MODEL\tAUTH CONFIGURED")
-	fmt.Fprintln(w, "--\t----\t--------\t------------\t---------------")
+	fmt.Fprintln(w, "ID\tACCOUNT\tTYPE\tPRIORITY\tTARGET MODEL\tAUTH\tOFF")
+	fmt.Fprintln(w, "--\t-------\t----\t--------\t------------\t----\t---")
 
 	for _, p := range rows {
 		authSet := "No"
@@ -563,16 +580,27 @@ func CmdAccounts() {
 			if provider.ResolveSecret(p.SessionKey) != "" {
 				authSet = "Yes (Session Key)"
 			}
+		case "gemini_web":
+			if provider.ResolveSecret(p.Cookies) != "" || strings.TrimSpace(p.Cookies) != "" {
+				authSet = "Yes (Cookies)"
+			}
 		case "codex_cli":
 			authSet = "Yes (reused from `am add codex`)"
 		}
 
+		off := ""
+		if p.Enabled != nil && !*p.Enabled {
+			off = "yes"
+		}
 		model := p.Model
 		if model == "" {
 			model = "-"
 		}
-
-		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\n", p.ID, p.Type, p.Priority, model, authSet)
+		acct := p.Account
+		if acct == "" {
+			acct = "-"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n", p.ID, acct, p.Type, p.Priority, model, authSet, off)
 	}
 	w.Flush()
 }
@@ -626,8 +654,30 @@ func CmdAccountsCmd(args []string) {
 		}
 		proxy.Sync()
 		fmt.Printf("set %s model to %s\n", args[1], args[2])
+	case "off", "disable":
+		if len(args) < 2 {
+			fmt.Println("Usage: amux accounts off <id>")
+			return
+		}
+		if err := provider.SetEnabled(provider.DefaultAccountsPath(), args[1], false); err != nil {
+			fmt.Printf("Error: %v\n", err)
+			return
+		}
+		proxy.Sync()
+		fmt.Printf("off %s — pool will skip it (am accounts on %s to restore)\n", args[1], args[1])
+	case "on", "enable":
+		if len(args) < 2 {
+			fmt.Println("Usage: amux accounts on <id>")
+			return
+		}
+		if err := provider.SetEnabled(provider.DefaultAccountsPath(), args[1], true); err != nil {
+			fmt.Printf("Error: %v\n", err)
+			return
+		}
+		proxy.Sync()
+		fmt.Printf("on %s — back in the pool\n", args[1])
 	default:
-		fmt.Println("Usage: amux accounts [ls | rm <id> | priority <id> <N> | model <id> <model>]")
+		fmt.Println("Usage: amux accounts [ls | rm <id> | priority <id> <N> | model <id> <model> | off <id> | on <id>]")
 	}
 }
 
