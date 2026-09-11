@@ -1,10 +1,8 @@
-// Package types holds the shared request/response shapes and the
-// ProviderAdapter interface every chat provider (OpenAI-compatible API,
-// ChatGPT Web, Claude Web, Gemini, ...) implements.
 package types
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 )
 
@@ -20,10 +18,34 @@ var (
 	ErrAuthentication = errors.New("authentication failed")
 )
 
+// ToolDef is a provider-agnostic tool/function declaration.
+type ToolDef struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	InputSchema json.RawMessage `json:"input_schema,omitempty"` // JSON Schema object
+}
+
+// ToolCall is one model-requested tool invocation.
+type ToolCall struct {
+	ID        string `json:"id,omitempty"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments,omitempty"` // JSON object as string
+}
+
 // ChatMessage is one turn in a conversation.
+//
+// Roles:
+//   - "system", "user", "assistant" — normal chat
+//   - "tool" — tool result (OpenAI-shaped); set ToolCallID
+//
+// Assistant turns that invoke tools carry ToolCalls; Content may still hold
+// any accompanying text.
 type ChatMessage struct {
-	Role    string `json:"role"` // "system", "user", "assistant"
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Name       string     `json:"name,omitempty"`
 }
 
 // ChatRequest is provider-agnostic; each adapter translates it into
@@ -33,20 +55,29 @@ type ChatRequest struct {
 	Messages    []ChatMessage `json:"messages"`
 	Stream      bool          `json:"stream"`
 	Temperature float64       `json:"temperature,omitempty"`
+	Tools       []ToolDef     `json:"tools,omitempty"`
+	// ToolChoice mirrors OpenAI/Anthropic tool_choice when set ("auto",
+	// "none", or a named tool). Adapters that don't support it ignore it.
+	ToolChoice any `json:"tool_choice,omitempty"`
 	// FullContext tells web backends to flatten the entire client history
 	// into one prompt (Claude Code / Codex send full turns every request)
 	// instead of only the last user message on a server-side thread.
 	// Not serialized on the wire — set by the Anthropic/OpenAI bridges.
 	FullContext bool `json:"-"`
+	// ClientDialect hints which wire format the HTTP client spoke
+	// ("anthropic", "openai", "gemini"). Used by bridges when emitting.
+	ClientDialect string `json:"-"`
 }
 
 // StreamChunk is one piece of a streamed reply. The producer closes the
 // channel after sending a chunk with Done set (or one carrying Error).
 type StreamChunk struct {
-	ID      string
-	Content string
-	Done    bool
-	Error   error
+	ID           string
+	Content      string
+	ToolCalls    []ToolCall // set when the model requests tool use
+	FinishReason string     // "stop", "tool_calls", "end_turn", ...
+	Done         bool
+	Error        error
 }
 
 // ProviderAdapter is implemented by every chat backend the router can

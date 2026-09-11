@@ -14,6 +14,8 @@
   <a href="#-cài-đặt-nhanh">Cài Đặt</a> •
   <a href="#-danh-sách-lệnh-cli-amux--am">Lệnh CLI</a> •
   <a href="#-local-ai-gateway-http1270018787">AI Gateway</a> •
+  <a href="#-luồng-claude-code--proxy--tools">Claude Code & Tools</a> •
+  <a href="#-amux-watch--dashboard-realtime">Watch</a> •
   <a href="#️-cấu-hình-provider-pool-amaccountsjson">Provider Pool</a> •
   <a href="STRUCT.md">Kiến Trúc</a>
 </p>
@@ -24,6 +26,7 @@
 
 - 🔄 **Auto-Rotate Claude Accounts:** Tự động phát hiện và xoay vòng qua nhiều tài khoản Claude Pro / Max trước khi chạm rate limit (dựa vào header `anthropic-ratelimit-*`), tự động refresh token OAuth.
 - 🌐 **Local AI Gateway (`:8787`):** Cung cấp endpoint chuẩn OpenAI (`http://127.0.0.1:8787/v1`) tương thích với Cursor, Continue, Cline, LangChain, SDK Python, Node.js...
+- 🧰 **Tool Mid-Layer (`pkg/tools`):** Chuyển đổi tool schema / tool_call giữa Claude Code, Cursor, Codex, Antigravity (Gemini) — Claude Code vẫn nhận `tool_use` và tự thực thi tool local.
 - 🛡️ **Multi-Provider Failover:** Tự động chuyển mạch dự phòng tức thì khi gặp lỗi 429 giữa các nhà cung cấp (GitHub Models, Gemini API, Groq, DuckDuckGo, Web Sessions) với cơ chế cooldown 30 phút.
 - 🧠 **Context & Session Retention:** Giữ nguyên lịch sử hội thoại khi chuyển đổi tài khoản hoặc failover giữa các provider.
 - 📊 **Token Usage Analytics:** Đo lường chi tiết lượng token theo ngày, project, model và session kết nối.
@@ -78,6 +81,7 @@ curl -fsSL https://raw.githubusercontent.com/ninhlee99/amux/main/install.sh | sh
 | `am setup [--auto-update]` | Cài đặt Claude hook, slash command & kích hoạt tự động cập nhật |
 | `am update` | Nâng cấp amux lên bản mới nhất từ GitHub (giữ nguyên toàn bộ tài khoản) |
 | `am status` | Xem trạng thái proxy daemon, auto-update, các tab kết nối và quota |
+| `am watch` | Dashboard TUI: Dash (overview) · Accounts · Logs · Usage · Requests |
 | `am usage [day\|week\|month]` | Thống kê số lượng token sử dụng (thêm `-D` để xem chi tiết) |
 | `am proxy [up\|down]` | Khởi động hoặc dừng proxy daemon chạy nền |
 | `am env` | Xuất biến môi trường trỏ vào proxy (`eval "$(am env)"`) |
@@ -115,6 +119,104 @@ for chunk in stream:
     if chunk.choices[0].delta.content:
         print(chunk.choices[0].delta.content, end="", flush=True)
 ```
+
+---
+
+## 🧰 Luồng Claude Code ↔ Proxy ↔ Tools
+
+Claude Code **không** chạy tool trên server amux. Client sở hữu Bash/Read/Edit…; proxy chỉ cần trả đúng khối `tool_use` (Anthropic) hoặc `tool_calls` (OpenAI) để agent loop tiếp tục.
+
+### Ai nói ngôn ngữ nào?
+
+| Client | Endpoint proxy | Tool wire format |
+| :--- | :--- | :--- |
+| **Claude Code** | `POST /v1/messages` | Anthropic `tools[]` + `tool_use` / `tool_result` |
+| **Cursor / Codex** | `POST /v1/chat/completions` | OpenAI `tools[].function` + `tool_calls` |
+| **Antigravity** (Gemini-shaped) | qua converter | Gemini `functionDeclarations` / `functionCall` |
+
+Lớp giữa `pkg/tools` (`claude.go` / `cursor.go` / `codex.go` / `gemini.go`) chuẩn hoá mọi thứ về `types.ChatRequest`, rồi adapter pool nói đúng format upstream. Helper chung nằm ở `pkg/utils`.
+
+### Sơ đồ luồng (Claude Code + tools)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor CC as Claude Code
+    participant Proxy as Proxy :8787
+    participant Bridge as bridge + pkg/tools
+    participant Pool as AccountPoolRouter
+    participant Upstream as Provider (API / OAuth)
+
+    CC->>Proxy: POST /v1/messages<br/>messages + tools[]
+    alt Có Claude OAuth usable + tools[]
+        Proxy->>Upstream: Reverse-proxy api.anthropic.com
+        Upstream-->>CC: SSE tool_use (native)
+    else Mode provider / hết quota Claude / failover
+        Proxy->>Bridge: HandleClaudeMessages
+        Bridge->>Bridge: Anthropic tools → canonical<br/>tool_result → role=tool
+        Bridge->>Pool: Send(ChatRequest + Tools)
+        Pool->>Upstream: OpenAI tools / chat.completions
+        Upstream-->>Pool: tool_calls (SSE)
+        Pool-->>Bridge: StreamChunk.ToolCalls
+        Bridge-->>Proxy: SSE content_block tool_use
+        Proxy-->>CC: stop_reason=tool_use
+    end
+    Note over CC: Claude Code thực thi tool local<br/>(Bash, Read, Edit, …)
+    CC->>Proxy: POST /v1/messages<br/>+ tool_result blocks
+    Note over Proxy,Upstream: Vòng lặp tiếp tục đến end_turn
+```
+
+### Vai trò từng lớp
+
+1. **Claude Code (client)** — gửi transcript + `tools[]`; nhận `tool_use`; chạy tool trên máy; gửi lại `tool_result`.
+2. **Proxy (`pkg/proxy`)** — cổng `127.0.0.1:8787`; quyết định reverse-proxy Anthropic **hoặc** vào provider pool.
+3. **Bridge (`pkg/bridge`)** — Anthropic ↔ canonical ↔ OpenAI response SSE/JSON.
+4. **`pkg/tools`** — `claude.go` / `cursor.go` / `codex.go` / `gemini.go` (wire format từng client); phần chung ở `pkg/utils`.
+5. **Pool + adapters (`pkg/router`, `pkg/provider`)** — failover theo priority; OpenAI-compatible adapter gửi `tools` thật và gom `tool_calls` từ SSE.
+
+### Gắn Claude Code vào proxy
+
+```sh
+am proxy up
+eval "$(am env)"   # ANTHROPIC_BASE_URL=http://127.0.0.1:8787 …
+claude             # hoặc: am run claude
+```
+
+Hook SessionStart/End (`am hook install`) cũng bật/tắt proxy khi mở tab Claude Code.
+
+### Cursor / Codex (cùng mid-layer)
+
+```env
+OPENAI_BASE_URL="http://127.0.0.1:8787/v1"
+OPENAI_API_KEY="amux"
+```
+
+Cursor/Codex gửi OpenAI `tools` → `pkg/tools` → pool → trả `tool_calls` đúng dialect. Agent loop vẫn chạy phía client.
+
+> **Lưu ý:** Backend web (Claude/ChatGPT cookie) flatten transcript thành text — không có native tool loop. Agent tool đầy đủ cần Anthropic OAuth reverse-proxy hoặc provider OpenAI-compatible trong pool.
+
+---
+
+## 📺 `amux watch` — Dashboard realtime
+
+Theo dõi gateway trên terminal theo mô hình **overview → detail**:
+
+| Tab | Vai trò | Nội dung |
+| :--- | :--- | :--- |
+| **1 Dash** | Overview | Proxy KPI, accounts/pool counts, token 7 ngày, activity + request gần nhất |
+| **2 Accounts** | Detail | Claude accounts (bar 5h/7d) + provider pool đầy đủ |
+| **3 Logs** | Detail | ROTATE / FAILOVER / AUTH / PROXY… (filter `/`) |
+| **4 Usage** | Detail | Token theo day/week/month/all · account · project |
+| **5 Requests** | Detail | Chat I/O preview, dialect, latency, stop reason |
+
+```sh
+am proxy up          # terminal khác
+am watch             # dashboard
+```
+
+Phím: `1`–`5` / `Tab` đổi tab · `/` filter (tab detail) · `d/w/m/a` + `p` (Usage) · `c` clear · `↑↓` scroll · `r` refresh · `q` thoát.
+
+Log lưu tại `~/.am/events.log` và `~/.am/requests.log` (JSONL).
 
 ---
 

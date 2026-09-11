@@ -15,6 +15,7 @@ import (
 	"amux-accounts/pkg/browser"
 	"amux-accounts/pkg/provider"
 	"amux-accounts/pkg/proxy"
+	"amux-accounts/pkg/term"
 	"amux-accounts/pkg/types"
 )
 
@@ -555,15 +556,15 @@ func CmdAccounts() {
 	}
 
 	if len(rows) == 0 {
-		fmt.Println("No accounts configured in pool yet. Run 'amux login <provider>' or create ~/.am/accounts.json.")
+		term.Warn("No accounts in pool. Run `amux login <provider>` or edit ~/.am/accounts.json.")
 		return
 	}
 
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Priority < rows[j].Priority })
 
+	term.Header("amux accounts", "provider pool · priority = try order")
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "ID\tACCOUNT\tTYPE\tPRIORITY\tTARGET MODEL\tAUTH\tOFF")
-	fmt.Fprintln(w, "--\t-------\t----\t--------\t------------\t----\t---")
+	fmt.Fprintln(w, term.Dim("ID\tACCOUNT\tTYPE\tPRIORITY\tMODEL\tAUTH\tOFF"))
 
 	for _, p := range rows {
 		authSet := "No"

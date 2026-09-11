@@ -1,7 +1,6 @@
 package bridge_test
 
 import (
-	"strings"
 	"testing"
 
 	"amux-accounts/pkg/bridge"
@@ -45,9 +44,10 @@ func TestToChatRequest_SystemAndMessages(t *testing.T) {
 	}
 }
 
-func TestToChatRequest_FlattensToolHistory(t *testing.T) {
+func TestToChatRequest_ExpandsToolHistory(t *testing.T) {
 	raw := []byte(`{
 		"model":"claude-sonnet-4-20250514",
+		"tools":[{"name":"Bash","description":"shell","input_schema":{"type":"object","properties":{}}}],
 		"messages":[{
 			"role":"user",
 			"content":[
@@ -61,11 +61,16 @@ func TestToChatRequest_FlattensToolHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(req.Messages) != 1 {
-		t.Fatalf("msgs=%d", len(req.Messages))
+	if len(req.Tools) != 1 || req.Tools[0].Name != "Bash" {
+		t.Fatalf("tools=%+v", req.Tools)
 	}
-	c := req.Messages[0].Content
-	if !strings.Contains(c, "Tool result") || !strings.Contains(c, "package main") || !strings.Contains(c, "fix the panic") {
-		t.Fatalf("content=%q", c)
+	if len(req.Messages) != 2 {
+		t.Fatalf("msgs=%d want 2 (tool + user text), got %+v", len(req.Messages), req.Messages)
+	}
+	if req.Messages[0].Role != "tool" || req.Messages[0].ToolCallID != "toolu_1" || req.Messages[0].Content != "package main" {
+		t.Fatalf("tool msg=%+v", req.Messages[0])
+	}
+	if req.Messages[1].Role != "user" || req.Messages[1].Content != "fix the panic" {
+		t.Fatalf("user msg=%+v", req.Messages[1])
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"amux-accounts/pkg/term"
 	"amux-accounts/pkg/types"
 )
 
@@ -128,7 +129,7 @@ func (r *AccountPoolRouter) Send(ctx context.Context, req *types.ChatRequest) (<
 			if errors.Is(err, types.ErrRateLimitReached) {
 				r.setCooldown(a.ID())
 				skippedPreferred = true
-				log.Printf("router: preferred %s rate-limited — failing over and will activate winner", a.ID())
+				term.LogFailover("preferred %s rate-limited — failing over", a.ID())
 				errs = append(errs, fmt.Errorf("%s: %w", a.ID(), err))
 				break
 			}
@@ -154,16 +155,16 @@ func (r *AccountPoolRouter) Send(ctx context.Context, req *types.ChatRequest) (<
 			was := preferredID
 			r.markUsed(a.ID(), true)
 			if was != "" && was != a.ID() {
-				log.Printf("router: auto-switched active provider %s → %s", was, a.ID())
+				term.LogPool("auto-switch %s → %s", was, a.ID())
 			} else if was == "" {
-				log.Printf("router: active provider → %s", a.ID())
+				term.LogPool("active provider → %s", a.ID())
 			}
 			return ch, nil
 		}
 		if errors.Is(err, types.ErrRateLimitReached) {
 			r.setCooldown(a.ID())
 		}
-		log.Printf("router: %s failed, trying next adapter: %v", a.ID(), err)
+		term.LogWarn("%s failed, next: %v", a.ID(), err)
 		errs = append(errs, fmt.Errorf("%s: %w", a.ID(), err))
 	}
 	if len(errs) == 0 {

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"amux-accounts/pkg/monitor"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"amux-accounts/pkg/profile"
 	"amux-accounts/pkg/provider"
 	"amux-accounts/pkg/router"
+	"amux-accounts/pkg/term"
 	"amux-accounts/pkg/types"
 	"amux-accounts/pkg/usage"
 )
@@ -75,6 +77,8 @@ const shutdownGrace = 3 * time.Second
 // RunProxy starts the server on the given address, serving Claude Code,
 // OpenAI gateway, and administrative endpoints.
 func RunProxy(addr, upstream string) error {
+	monitor.EnableTermSink()
+
 	if addr == "" {
 		addr = "127.0.0.1:8787"
 	}
@@ -108,7 +112,7 @@ func RunProxy(addr, upstream string) error {
 	srv = &http.Server{Addr: addr, Handler: sw}
 
 	_ = os.MkdirAll(types.BaseDir(), 0o700)
-	log.Printf("amux proxy up on %s, active claude account %q", addr, rot.Active())
+	term.LogProxy("up on %s · active %q", addr, rot.Active())
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}
@@ -244,9 +248,9 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 	mux.HandleFunc("/_am/pool", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"preferred":  chatPool.Preferred(),
-			"providers":  chatPool.Status(),
-			"tool_pool":  toolPool.Status(),
+			"preferred": chatPool.Preferred(),
+			"providers": chatPool.Status(),
+			"tool_pool": toolPool.Status(),
 		})
 	})
 
@@ -297,10 +301,12 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 		//
 		// Same model as attaching an API key to Claude Code:
 		//   ANTHROPIC_BASE_URL → this proxy
-		//   Claude Code owns tools; upstream must speak native tool_use.
+		//   Claude Code owns tools locally; mid-layer pkg/tools
+		//   converts tool defs/calls between Anthropic ↔ OpenAI ↔ Gemini.
 		// When a Claude OAuth account is usable and the request includes
-		// tools[], reverse-proxy to Anthropic (ignore provider/web mode).
-		// Web/pool is chat failover or tool-less traffic only.
+		// tools[], reverse-proxy to Anthropic for native tool_use.
+		// Provider-pool path also preserves tools via bridge + pkg/tools
+		// so OpenAI-compatible backends can drive Claude Code's agent loop.
 		if strings.HasSuffix(path, "/messages") {
 			body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
 			if err != nil {

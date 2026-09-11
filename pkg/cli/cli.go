@@ -18,6 +18,7 @@ import (
 
 	"amux-accounts/pkg/env"
 	"amux-accounts/pkg/hook"
+	"amux-accounts/pkg/monitor"
 	"amux-accounts/pkg/profile"
 	"amux-accounts/pkg/provider"
 	"amux-accounts/pkg/proxy"
@@ -52,6 +53,7 @@ Account Profiles:
   amux on <id|name>           re-enable a Claude profile
   amux current [tool]         print the currently active account on system
   amux status                 proxy state, rate limits (5h/7d), provider pool
+  amux watch                  live TUI: Dash · Accounts · Logs · Usage · Requests
 
 Multi-Provider Gateway & Plugins:
   amux login [provider] [--browser] [--token T] [--cookie C] [--refresh R] [--model M]
@@ -103,6 +105,8 @@ func Run(rawArgs []string) {
 		usageHelp()
 		return
 	}
+
+	monitor.EnableTermSink()
 
 	// One-time (cheap-after-first-run) migration of the old fixed-literal
 	// pool provider IDs (claude-web, chatgpt-web, ...) to the unified
@@ -217,6 +221,9 @@ func Run(rawArgs []string) {
 
 	case "status", "st":
 		ui.CmdStatus()
+
+	case "watch", "dash", "dashboard":
+		ui.CmdWatch()
 
 	case "current":
 		tool := "claude"
@@ -392,7 +399,6 @@ func Run(rawArgs []string) {
 		if err := profile.CmdImport(args); err != nil {
 			die("%v", err)
 		}
-
 
 	case "feedback":
 		cmdFeedback(args)
@@ -661,7 +667,6 @@ func cmdRun(args []string) {
 	}
 	_ = syscall.Exec(bin, append([]string{tool}, rest...), environ)
 }
-
 
 func cmdSetup(args []string) {
 	autoUpdate := false

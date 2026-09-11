@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>amux · Claude Code — Tool Report</title>
+<style>
+  :root { --bg:#1a1a1a; --panel:#262624; --text:#f5f4ef; --muted:#a8a29e; --accent:#d97757; --ok:#7cb87c; --line:#3a3936; --mono:ui-monospace,SFMono-Regular,Menlo,monospace; --sans:ui-sans-serif,system-ui,sans-serif; }
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 var(--sans)}
+  .wrap{max-width:820px;margin:0 auto;padding:32px 20px 64px}
+  .brand{font:600 13px var(--mono);color:var(--accent);letter-spacing:.04em}
+  h1{font-size:28px;font-weight:560;margin:8px 0 4px;letter-spacing:-.02em}
+  .sub{color:var(--muted);margin-bottom:28px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:14px 0}
+  .card h2{margin:0 0 10px;font-size:14px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600}
+  table{width:100%;border-collapse:collapse;font:13px/1.45 var(--mono)}
+  th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:500}
+  .ok{color:var(--ok)} .warn{color:#e8b339} .bad{color:#e07070}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#3a2f2a;color:var(--accent);font:12px var(--mono)}
+  code{font-family:var(--mono);font-size:12px;color:#e7d5c4}
+  ul{margin:8px 0;padding-left:18px;color:var(--muted)}
+  li{margin:4px 0;color:var(--text)}
+  footer{margin-top:28px;color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand">CLAUDE CODE · ANTHROPIC /v1/messages</div>
+  <h1>Tool mid-layer report</h1>
+  <p class="sub">amux proxy · dialect <span class="pill">claude</span> · pkg/tools + pkg/bridge</p>
+
+  <div class="card">
+    <h2>Verdict</h2>
+    <p><span class="ok">PASS</span> — Client nhận <code>tool_use</code>, gửi lại <code>tool_result</code>; proxy giữ tools qua pool / reverse-proxy Anthropic.</p>
+    <p style="color:var(--muted);font-size:13px">Claude Code <b>tự thực thi</b> Bash/Read/Edit trên máy local. Proxy chỉ cần wire format đúng — không chạy tool trên server.</p>
+  </div>
+
+  <div class="card">
+    <h2>Tools đã test (agent loop)</h2>
+    <table>
+      <tr><th>Tool</th><th>Defs → wire</th><th>Call (tool_use)</th><th>Result (tool_result)</th><th>Ghi chú</th></tr>
+      <tr><td><code>Bash</code></td><td class="ok">OK</td><td class="ok">OK</td><td class="ok">OK</td><td>input_schema object + command</td></tr>
+      <tr><td><code>Read</code></td><td class="ok">OK</td><td class="ok">OK</td><td class="ok">OK</td><td>path arg round-trip</td></tr>
+      <tr><td><code>Edit</code></td><td class="ok">OK</td><td class="ok">—</td><td class="ok">—</td><td>def parse/convert; call covered via cross-dialect</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Tests</h2>
+    <ul>
+      <li><code>TestAgentToolLoop_Claude</code></li>
+      <li><code>TestToChatRequest_ExpandsToolHistory</code></li>
+      <li><code>TestClaudeBridge_EmitsToolUseForClientExecution</code></li>
+      <li><code>TestClaudeBridge_AcceptsToolResultsFromClient</code></li>
+      <li><code>TestHandler_MessagesWithToolsUsesClaudeWhenUsable</code> (proxy routing)</li>
+      <li><code>TestCrossDialect_ClaudeToCursorCodexGemini</code></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>Web provider caveat</h2>
+    <p>Khi request có <code>tools[]</code> và Claude OAuth usable → reverse-proxy Anthropic (native tool_use). Web cookie adapters <span class="warn">không</span> emit native tool_use — pool path vẫn convert qua pkg/tools nếu failover openai_compatible.</p>
+  </div>
+
+  <footer>Generated for amux · feat/account-off · go test ./pkg/tools ./pkg/bridge PASS</footer>
+</div>
+</body>
+</html>

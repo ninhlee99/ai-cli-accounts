@@ -11,6 +11,7 @@ import (
 
 	"amux-accounts/pkg/auth"
 	"amux-accounts/pkg/profile"
+	"amux-accounts/pkg/term"
 	"amux-accounts/pkg/types"
 )
 
@@ -58,8 +59,8 @@ type Rotator struct {
 	tool string
 
 	mu       sync.Mutex
-	order    []string          // profile names, rotation order
-	idx      int               // index into order
+	order    []string // profile names, rotation order
+	idx      int      // index into order
 	tokens   map[string]*types.Token
 	accounts map[string]string // profile name -> account email (cached)
 	cooldown map[string]time.Time
@@ -223,7 +224,7 @@ func (r *Rotator) Token() string {
 		r.mu.Lock()
 		r.dead[name] = true
 		r.mu.Unlock()
-		log.Printf("amux: active profile %s is expired and refresh failed; blacklisting", name)
+		term.LogAuth("%s expired & refresh failed — blacklist", name)
 		return ""
 	}
 
@@ -271,7 +272,7 @@ func (r *Rotator) Observe(resp *http.Response) {
 		r.mu.Lock()
 		r.dead[name] = true
 		r.mu.Unlock()
-		log.Printf("amux: upstream returned 401 for %s, marking dead", name)
+		term.LogAuth("401 for %s — marking dead", name)
 		r.Rotate(name, "401 unauthorized")
 		return
 	}
@@ -424,7 +425,7 @@ func (r *Rotator) EnsureUsableActive() bool {
 			log.Printf("amux: Claude %s refresh dead while recovering, trying next", target)
 			return r.EnsureUsableActive()
 		}
-		log.Printf("amux: Claude account available again — switched back to %s", target)
+		term.LogOK("Claude available — switched back to %s", target)
 		return true
 	}
 	r.mu.Unlock()
@@ -515,7 +516,7 @@ func (r *Rotator) Rotate(from, reason string) {
 		}
 		if !profile.InstallActiveProfile(cand) {
 			r.dead[cand] = true
-			log.Printf("ROTATE (%s): %s -> %s refresh dead, blacklisting until re-login", reason, from, cand)
+			term.LogRotate("%s: %s → %s (refresh dead — blacklist)", reason, from, cand)
 			continue
 		}
 		r.idx = (r.idx + step) % n
@@ -523,10 +524,10 @@ func (r *Rotator) Rotate(from, reason string) {
 		r.autoSwitches[from]++
 		r.lastSwitch = time.Now()
 		profile.WriteActivePointer(r.tool, cand)
-		log.Printf("ROTATE (%s): %s -> %s", reason, from, cand)
+		term.LogRotate("%s: %s → %s", reason, from, cand)
 		return
 	}
-	log.Printf("ROTATE (%s): %s -> (all accounts cooling down or dead; staying)", reason, from)
+	term.LogWarn("ROTATE %s: %s → (all cooling/dead)", reason, from)
 }
 
 // ForceSwitch makes the named profile active immediately (the next request
@@ -576,7 +577,7 @@ func (r *Rotator) ForceSwitch(name string) error {
 		r.mu.Unlock()
 		return fmt.Errorf("refresh token for %q is dead — log into it again before switching to it", target)
 	}
-	log.Printf("MANUAL SWITCH -> %s", target)
+	term.LogSwitch("→ %s", target)
 	return nil
 }
 
