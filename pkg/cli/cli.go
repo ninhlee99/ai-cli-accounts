@@ -88,10 +88,13 @@ Monitoring & Utilities:
   amux usage [day|week|month|all] [-D|--detail] [-d YYYY-MM-DD] [-p PROJECT]
                             token usage analytics
   amux run <tool> [args...]   exec tool (currently: claude) routed through the proxy
-  amux proxy [up|down] [--threshold N]  run/manage proxy daemon (default :8787);
+  amux proxy [up|down] [--public] [-b|--addr HOST] [-p|--port N] [--threshold N]
+                            run/manage proxy daemon (default 127.0.0.1:8787;
+                            --public binds 0.0.0.0; -p/--port overrides port)
                             --threshold N  auto-switch Claude account when 5h/7d
                             utilization >= N% (default 95). Also: AM_ROTATE_THRESHOLD
-  amux env                    print export ANTHROPIC_BASE_URL=... for eval "$(amux env)"
+  amux env [--public]         print export ANTHROPIC_BASE_URL=... for eval "$(amux env)";
+                            --public uses LAN IP when proxy is bound on 0.0.0.0
   amux hook [install|uninstall|status]
   amux export [tool] [name..] [-o file|--stdout]  encrypted profile bundle
   amux import [-f file] [--activate tool=name]
@@ -275,8 +278,16 @@ func Run(rawArgs []string) {
 		cmdRun(args)
 
 	case "env":
-		if len(args) == 0 {
-			env.PrintEnvExports(proxy.ProxyUp(), len(profile.ListProfiles("claude")) > 0, proxy.ProxyBase())
+		if len(args) == 0 || (len(args) == 1 && args[0] == "--public") {
+			base := proxy.ProxyBase()
+			if len(args) == 1 && args[0] == "--public" {
+				if pub := proxy.PublicBaseURL(proxy.ListenAddr()); pub != "" {
+					base = pub
+				} else {
+					die("proxy not listening publicly (start with: am proxy up --public)")
+				}
+			}
+			env.PrintEnvExports(proxy.ProxyUp(), len(profile.ListProfiles("claude")) > 0, base)
 			return
 		}
 		switch args[0] {
@@ -340,7 +351,8 @@ func Run(rawArgs []string) {
 			switch args[0] {
 			case "up":
 				threshold := proxyThresholdFromArgs(args[1:])
-				proxy.CmdProxyUp(threshold)
+				listen := proxyListenFromArgs(args[1:])
+				proxy.CmdProxyUpWithAddr(listen, threshold)
 				return
 			case "down":
 				force := false
@@ -357,15 +369,18 @@ func Run(rawArgs []string) {
 				return
 			}
 		}
-		addr := "127.0.0.1:8787"
+		addr := proxy.ResolveListenAddr(proxyListenFromArgs(args))
+		if addr == "" {
+			addr = "127.0.0.1:8787"
+		}
 		upstream := "https://api.anthropic.com"
 		supervise := false
 		threshold := proxyThresholdFromArgs(args)
 		for i := 0; i < len(args); i++ {
 			switch args[i] {
-			case "--addr":
-				if i+1 < len(args) {
-					addr = args[i+1]
+			case "--addr", "-b", "--port", "-p", "--public":
+				// consumed by proxyListenFromArgs
+				if (args[i] == "--addr" || args[i] == "-b" || args[i] == "--port" || args[i] == "-p") && i+1 < len(args) {
 					i++
 				}
 			case "--upstream":
@@ -386,6 +401,9 @@ func Run(rawArgs []string) {
 				// aren't either.
 				supervise = true
 			}
+		}
+		if proxyListenFromArgs(args) != "" {
+			_ = proxy.SaveListenAddr(addr)
 		}
 		proxy.SetUsedThreshold(threshold)
 		if supervise {
@@ -434,6 +452,19 @@ func proxyThresholdFromArgs(args []string) float64 {
 		}
 	}
 	return proxy.DefaultUsedThreshold
+}
+
+// proxyListenFromArgs returns an explicit listen override from --public,
+// --addr/-b, and/or --port/-p. Empty means "use env / persisted / default".
+func proxyListenFromArgs(args []string) string {
+	listen, ok, err := proxy.ParseListenArgs(args)
+	if err != nil {
+		die("%v", err)
+	}
+	if !ok {
+		return ""
+	}
+	return listen
 }
 
 func toolAndName(rest []string) (tool, name string) {

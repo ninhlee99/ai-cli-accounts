@@ -32,6 +32,15 @@ func loadBindConfig() bindConfig {
 	return c
 }
 
+func saveBindConfig(c bindConfig) error {
+	_ = os.MkdirAll(types.BaseDir(), 0o700)
+	b, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(bindConfigPath(), b, 0o600)
+}
+
 // SaveBindPublic persists whether the daemon should listen on 0.0.0.0.
 func SaveBindPublic(public bool) error {
 	c := loadBindConfig()
@@ -39,12 +48,42 @@ func SaveBindPublic(public bool) error {
 	if c.Port == "" {
 		c.Port = listenPort()
 	}
-	_ = os.MkdirAll(types.BaseDir(), 0o700)
-	b, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
-		return err
+	return saveBindConfig(c)
+}
+
+// SaveBindPort persists the daemon listen port (keeps public flag).
+func SaveBindPort(port string) error {
+	port = strings.TrimSpace(port)
+	if port == "" {
+		return nil
 	}
-	return os.WriteFile(bindConfigPath(), b, 0o600)
+	c := loadBindConfig()
+	c.Port = port
+	return saveBindConfig(c)
+}
+
+// SaveBindListen derives public/port from a full listen addr (host:port) and
+// persists them in proxy.bind.json — single source of truth for ListenAddr().
+func SaveBindListen(addr string) error {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		// bare host or :port — normalize via addr helpers when available
+		addr = normalizeListenAddr(addr)
+		host, port, err = net.SplitHostPort(addr)
+		if err != nil {
+			return fmt.Errorf("invalid listen addr %q: %w", addr, err)
+		}
+	}
+	c := loadBindConfig()
+	c.Public = host == "0.0.0.0" || host == "::" || host == ""
+	if port != "" {
+		c.Port = port
+	}
+	return saveBindConfig(c)
 }
 
 // IsPublic reports saved public-bind preference.

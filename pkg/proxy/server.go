@@ -81,7 +81,9 @@ func RunProxy(addr, upstream string) error {
 	monitor.EnableTermSink()
 
 	if addr == "" {
-		addr = "127.0.0.1:8787"
+		addr = ResolveListenAddr("")
+	} else {
+		addr = normalizeListenAddr(addr)
 	}
 	if upstream == "" {
 		upstream = "https://api.anthropic.com"
