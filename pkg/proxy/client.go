@@ -59,11 +59,23 @@ func proxyStatusMode() string {
 type UpFlags struct {
 	Threshold float64 // 0 → default / env
 	Public    *bool   // nil keep saved; non-nil persist + restart
+	Port      string  // non-empty → persist port + restart
+	Listen    string  // full host:port override → persist via SaveBindListen + restart
 	Restart   bool    // force respawn even if already up
 }
 
 func CmdProxyUp(threshold ...float64) {
 	f := UpFlags{}
+	if len(threshold) > 0 && threshold[0] > 0 {
+		f.Threshold = threshold[0]
+	}
+	CmdProxyUpFlags(f)
+}
+
+// CmdProxyUpWithAddr starts (or attaches to) the proxy. listenOverride comes
+// from `am proxy up --public` / `--addr` / `--port`; empty keeps saved bind.
+func CmdProxyUpWithAddr(listenOverride string, threshold ...float64) {
+	f := UpFlags{Listen: strings.TrimSpace(listenOverride)}
 	if len(threshold) > 0 && threshold[0] > 0 {
 		f.Threshold = threshold[0]
 	}
@@ -81,11 +93,24 @@ func CmdProxyUpFlags(f UpFlags) {
 	}
 	SetUsedThreshold(thresh)
 
-	if f.Public != nil {
-		if err := SaveBindPublic(*f.Public); err != nil {
+	if f.Listen != "" {
+		if err := SaveBindListen(f.Listen); err != nil {
 			fmt.Fprintf(os.Stderr, "amux: save bind preference: %v\n", err)
 		}
 		f.Restart = true
+	} else {
+		if f.Public != nil {
+			if err := SaveBindPublic(*f.Public); err != nil {
+				fmt.Fprintf(os.Stderr, "amux: save bind preference: %v\n", err)
+			}
+			f.Restart = true
+		}
+		if f.Port != "" {
+			if err := SaveBindPort(f.Port); err != nil {
+				fmt.Fprintf(os.Stderr, "amux: save bind port: %v\n", err)
+			}
+			f.Restart = true
+		}
 	}
 
 	needSpawn := !ProxyUp() || f.Restart
