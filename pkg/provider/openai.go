@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 
+	"amux-accounts/pkg/tools"
 	"amux-accounts/pkg/types"
 )
 
@@ -38,13 +39,14 @@ func (a *OpenAICompatibleAdapter) client() *http.Client {
 
 // SendMessageStream posts req (with Model swapped for TargetModel) to
 // BaseURL+"/chat/completions" and streams the SSE reply back as
-// types.StreamChunk values.
+// types.StreamChunk values. Tools are converted to OpenAI function format
+// via pkg/tools so Claude Code / Cursor / Codex defs round-trip.
 func (a *OpenAICompatibleAdapter) SendMessageStream(ctx context.Context, req *types.ChatRequest) (<-chan types.StreamChunk, error) {
 	body := *req
 	body.Model = a.TargetModel
 	body.Stream = true
 
-	payload, err := json.Marshal(body)
+	payload, err := tools.MarshalOpenAIChatRequest(&body)
 	if err != nil {
 		return nil, fmt.Errorf("%s: encode request: %w", a.AdapterID, err)
 	}
@@ -92,6 +94,46 @@ func streamOpenAISSE(ctx context.Context, id string, resp *http.Response, out ch
 	defer close(out)
 	defer resp.Body.Close()
 
+	type deltaToolCall struct {
+		Index    int    `json:"index"`
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Function struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	}
+
+	type accCall struct {
+		id, name, args string
+	}
+	acc := map[int]*accCall{}
+
+	flush := func() []types.ToolCall {
+		if len(acc) == 0 {
+			return nil
+		}
+		max := -1
+		for i := range acc {
+			if i > max {
+				max = i
+			}
+		}
+		var outCalls []types.ToolCall
+		for i := 0; i <= max; i++ {
+			a := acc[i]
+			if a == nil || a.name == "" {
+				continue
+			}
+			args := a.args
+			if args == "" {
+				args = "{}"
+			}
+			outCalls = append(outCalls, types.ToolCall{ID: a.id, Name: a.name, Arguments: args})
+		}
+		return outCalls
+	}
+
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 64*1024), 1<<20)
 	doneSent := false
@@ -105,7 +147,12 @@ func streamOpenAISSE(ctx context.Context, id string, resp *http.Response, out ch
 			continue
 		}
 		if payload == "[DONE]" {
-			sendChunk(ctx, out, types.StreamChunk{ID: id, Done: true})
+			calls := flush()
+			fr := ""
+			if len(calls) > 0 {
+				fr = "tool_calls"
+			}
+			sendChunk(ctx, out, types.StreamChunk{ID: id, ToolCalls: calls, FinishReason: fr, Done: true})
 			doneSent = true
 			return
 		}
@@ -113,7 +160,8 @@ func streamOpenAISSE(ctx context.Context, id string, resp *http.Response, out ch
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content string `json:"content"`
+					Content   string          `json:"content"`
+					ToolCalls []deltaToolCall `json:"tool_calls"`
 				} `json:"delta"`
 				FinishReason *string `json:"finish_reason"`
 			} `json:"choices"`
@@ -143,8 +191,27 @@ func streamOpenAISSE(ctx context.Context, id string, resp *http.Response, out ch
 				return
 			}
 		}
+		for _, tc := range choice.Delta.ToolCalls {
+			a := acc[tc.Index]
+			if a == nil {
+				a = &accCall{}
+				acc[tc.Index] = a
+			}
+			if tc.ID != "" {
+				a.id = tc.ID
+			}
+			if tc.Function.Name != "" {
+				a.name = tc.Function.Name
+			}
+			a.args += tc.Function.Arguments
+		}
 		if choice.FinishReason != nil && *choice.FinishReason != "" {
-			sendChunk(ctx, out, types.StreamChunk{ID: id, Done: true})
+			calls := flush()
+			fr := *choice.FinishReason
+			if len(calls) > 0 && fr == "stop" {
+				fr = "tool_calls"
+			}
+			sendChunk(ctx, out, types.StreamChunk{ID: id, ToolCalls: calls, FinishReason: fr, Done: true})
 			doneSent = true
 			return
 		}
@@ -154,6 +221,12 @@ func streamOpenAISSE(ctx context.Context, id string, resp *http.Response, out ch
 		return
 	}
 	if !doneSent && ctx.Err() == nil {
-		sendChunk(ctx, out, types.StreamChunk{ID: id, Done: true})
+		calls := flush()
+		fr := ""
+		if len(calls) > 0 {
+			fr = "tool_calls"
+		}
+		sendChunk(ctx, out, types.StreamChunk{ID: id, ToolCalls: calls, FinishReason: fr, Done: true})
 	}
 }
+

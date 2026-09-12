@@ -1,7 +1,7 @@
 {
   "providers": [
     {
-      "id": "github-models",
+      "id": "github:api:01",
       "type": "openai_compatible",
       "priority": 1,
       "baseUrl": "https://models.github.ai/inference",
@@ -9,7 +9,7 @@
       "model": "gpt-4o"
     },
     {
-      "id": "google-ai-studio",
+      "id": "gemini:api:01",
       "type": "openai_compatible",
       "priority": 2,
       "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -17,7 +17,7 @@
       "model": "gemini-3.6-flash"
     },
     {
-      "id": "groq",
+      "id": "groq:api:01",
       "type": "openai_compatible",
       "priority": 3,
       "baseUrl": "https://api.groq.com/openai/v1",
@@ -25,19 +25,19 @@
       "model": "llama-3.3-70b-versatile"
     },
     {
-      "id": "duckduckgo",
+      "id": "duckduckgo:01",
       "type": "duckduckgo",
       "priority": 4,
       "model": "claude-3-haiku-20240307"
     },
     {
-      "id": "chatgpt-web",
+      "id": "chatgpt:01",
       "type": "chatgpt_web",
       "priority": 5,
       "sessionToken": "env:CHATGPT_SESSION_TOKEN"
     },
     {
-      "id": "claude-web",
+      "id": "claude:web:01",
       "type": "claude_web",
       "priority": 6,
       "sessionKey": "env:CLAUDE_SESSION_KEY",

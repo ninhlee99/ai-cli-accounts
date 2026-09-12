@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>amux · Codex — Tool Report</title>
+<style>
+  :root{--bg:#0d0d0d;--panel:#111;--text:#ececec;--muted:#9b9b9b;--accent:#10a37f;--ok:#10a37f;--line:#2f2f2f;--mono:ui-monospace,Menlo,monospace;--sans:Söhne,ui-sans-serif,system-ui,sans-serif}
+  *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 var(--sans)}
+  .wrap{max-width:820px;margin:0 auto;padding:36px 20px 64px}
+  .logo{width:28px;height:28px;border-radius:6px;background:var(--accent);display:inline-flex;align-items:center;justify-content:center;color:#041;font-weight:700;font-size:14px;margin-right:10px}
+  h1{display:flex;align-items:center;font-size:26px;font-weight:600;margin:0 0 8px}
+  .sub{color:var(--muted);margin-bottom:26px}
+  .card{border:1px solid var(--line);border-radius:14px;padding:18px;margin:12px 0;background:var(--panel)}
+  .card h2{margin:0 0 10px;font-size:13px;color:var(--muted);font-weight:600}
+  table{width:100%;border-collapse:collapse;font:12.5px var(--mono)}
+  th,td{text-align:left;padding:9px 6px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted)} .ok{color:var(--ok)}
+  code{font-family:var(--mono);font-size:12px;color:#9fe6c8}
+  ul{padding-left:18px} li{margin:4px 0}
+  .pill{font:11px var(--mono);background:#0f2a22;color:var(--accent);padding:3px 9px;border-radius:999px}
+  footer{margin-top:28px;color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1><span class="logo">⌘</span>Codex tool report</h1>
+  <p class="sub">amux · dialect <span class="pill">codex</span> · cùng OpenAI wire với Cursor (<code>/v1/chat/completions</code>)</p>
+
+  <div class="card">
+    <h2>Verdict</h2>
+    <p><span class="ok">PASS</span> — <code>ToCodexTools</code> / <code>ToCodexToolCalls</code> alias OpenAI shape; parse + round-trip + bridge emit OK.</p>
+  </div>
+
+  <div class="card">
+    <h2>Tools đã test</h2>
+    <table>
+      <tr><th>Tool</th><th>Def</th><th>tool_calls</th><th>tool result msg</th><th>Ghi chú</th></tr>
+      <tr><td><code>Bash</code></td><td class="ok">OK</td><td class="ok">OK</td><td class="ok">OK</td><td>full agent loop</td></tr>
+      <tr><td><code>Read</code></td><td class="ok">OK</td><td class="ok">OK</td><td class="ok">OK</td><td>arguments JSON string</td></tr>
+      <tr><td><code>Edit</code></td><td class="ok">OK</td><td class="ok">cross</td><td class="ok">shape</td><td>shared OpenAI tools[]</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Tests</h2>
+    <ul>
+      <li><code>TestAgentToolLoop_Codex</code></li>
+      <li><code>TestClaudeCursorRoundTrip</code> (Codex parse path)</li>
+      <li><code>TestCursorCodexBridge_EmitsToolCalls</code></li>
+      <li><code>TestCrossDialect_ClaudeToCursorCodexGemini</code></li>
+    </ul>
+  </div>
+
+  <footer>OpenAI Codex aesthetic · amux mid-layer</footer>
+</div>
+</body>
+</html>

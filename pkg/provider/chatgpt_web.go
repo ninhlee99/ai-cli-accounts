@@ -81,6 +81,26 @@ func BuildConcatenatedPrompt(messages []types.ChatMessage) string {
 		case "assistant":
 			sb.WriteString("Assistant: ")
 			sb.WriteString(m.Content)
+			for _, tc := range m.ToolCalls {
+				sb.WriteString("\n[Tool call: ")
+				sb.WriteString(tc.Name)
+				if tc.ID != "" {
+					sb.WriteString(" id=")
+					sb.WriteString(tc.ID)
+				}
+				sb.WriteString("]\n")
+				sb.WriteString(tc.Arguments)
+			}
+			sb.WriteString("\n\n")
+		case "tool":
+			sb.WriteString("Tool")
+			if m.ToolCallID != "" {
+				sb.WriteString(" (")
+				sb.WriteString(m.ToolCallID)
+				sb.WriteString(")")
+			}
+			sb.WriteString(": ")
+			sb.WriteString(m.Content)
 			sb.WriteString("\n\n")
 		default:
 			title := role

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"amux-accounts/pkg/monitor"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -16,9 +17,11 @@ import (
 	"time"
 
 	"amux-accounts/pkg/bridge"
+	"amux-accounts/pkg/privacy"
 	"amux-accounts/pkg/profile"
 	"amux-accounts/pkg/provider"
 	"amux-accounts/pkg/router"
+	"amux-accounts/pkg/term"
 	"amux-accounts/pkg/types"
 	"amux-accounts/pkg/usage"
 )
@@ -75,6 +78,8 @@ const shutdownGrace = 3 * time.Second
 // RunProxy starts the server on the given address, serving Claude Code,
 // OpenAI gateway, and administrative endpoints.
 func RunProxy(addr, upstream string) error {
+	monitor.EnableTermSink()
+
 	if addr == "" {
 		addr = "127.0.0.1:8787"
 	}
@@ -91,6 +96,9 @@ func RunProxy(addr, upstream string) error {
 
 	adapters, _ := provider.LoadAccounts(provider.DefaultAccountsPath())
 	pool := router.NewAccountPoolRouter(adapters)
+	if all, err := provider.LoadAllAddressable(provider.DefaultAccountsPath()); err == nil {
+		pool.SetDirectory(all)
+	}
 
 	rp, err := newReverseProxy(upstream, rot)
 	if err != nil {
@@ -108,7 +116,7 @@ func RunProxy(addr, upstream string) error {
 	srv = &http.Server{Addr: addr, Handler: sw}
 
 	_ = os.MkdirAll(types.BaseDir(), 0o700)
-	log.Printf("amux proxy up on %s, active claude account %q", addr, rot.Active())
+	term.LogProxy("up on %s · active %q", addr, rot.Active())
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}
@@ -148,6 +156,8 @@ func newReverseProxy(upstream string, rot *Rotator) (*httputil.ReverseProxy, err
 					r.Header.Del("Authorization")
 				}
 			}
+			// Scrub body before it leaves the machine toward Anthropic/upstream.
+			scrubOutboundBody(r)
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			rot.Observe(resp)
@@ -244,19 +254,26 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 	mux.HandleFunc("/_am/pool", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"preferred":  chatPool.Preferred(),
-			"providers":  chatPool.Status(),
-			"tool_pool":  toolPool.Status(),
+			"preferred": chatPool.Preferred(),
+			"providers": chatPool.Status(),
+			"tool_pool": toolPool.Status(),
 		})
 	})
 
 	mux.HandleFunc("/_am/sync", func(w http.ResponseWriter, r *http.Request) {
 		profile.SyncActiveFromSystem("claude")
 		rot.RefreshFromDisk()
+		rot.EvictDisabledActive()
 		if reloaded, err := provider.LoadAccounts(provider.DefaultAccountsPath()); err == nil {
 			chatPool.Reload(reloaded)
 			if toolPool != chatPool {
 				toolPool.Reload(reloaded)
+			}
+		}
+		if all, err := provider.LoadAllAddressable(provider.DefaultAccountsPath()); err == nil {
+			chatPool.SetDirectory(all)
+			if toolPool != chatPool {
+				toolPool.SetDirectory(all)
 			}
 		}
 		fmt.Fprintf(w, "%d\n", len(rot.Names()))
@@ -296,17 +313,30 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 		//
 		// Same model as attaching an API key to Claude Code:
 		//   ANTHROPIC_BASE_URL → this proxy
-		//   Claude Code owns tools; upstream must speak native tool_use.
+		//   Claude Code owns tools locally; mid-layer pkg/tools
+		//   converts tool defs/calls between Anthropic ↔ OpenAI ↔ Gemini.
 		// When a Claude OAuth account is usable and the request includes
-		// tools[], reverse-proxy to Anthropic (ignore provider/web mode).
-		// Web/pool is chat failover or tool-less traffic only.
+		// tools[], reverse-proxy to Anthropic for native tool_use.
+		// Provider-pool path also preserves tools via bridge + pkg/tools
+		// so OpenAI-compatible backends can drive Claude Code's agent loop.
 		if strings.HasSuffix(path, "/messages") {
 			body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
 			if err != nil {
 				http.Error(w, "read request body: "+err.Error(), http.StatusBadRequest)
 				return
 			}
+			if scrubbed, res := privacy.ScrubBytes(body); res.Len() > 0 {
+				body = scrubbed
+				privacy.LogHits(r, res, "claude")
+			}
 			r.Body = io.NopCloser(bytes.NewReader(body))
+			r.ContentLength = int64(len(body))
+			r.Header.Set("Content-Length", strconv.Itoa(len(body)))
+
+			xProvider := strings.TrimSpace(r.Header.Get("X-Provider"))
+			if xProvider == "" {
+				xProvider = strings.TrimSpace(r.Header.Get("x-provider"))
+			}
 
 			hasTools := anthropicRequestHasTools(body)
 			hasAPIKey := r.Header.Get("X-Api-Key") != "" ||
@@ -319,9 +349,22 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 			usePool := false
 			pool := toolPool
 			autoFromClaude := false
+
+			// Explicit X-Provider: pin that pool account (even out of rotate).
+			// Claude profile names still use ForceSwitch + reverse-proxy below.
+			if xProvider != "" {
+				if err := rot.ForceSwitchExplicit(xProvider); err == nil {
+					mode.Set("claude")
+					rp.ServeHTTP(w, r)
+					return
+				}
+				usePool = true
+			}
+
 			switch {
+			case usePool:
+				// already decided via X-Provider
 			case hasTools && claudeUsable:
-				// API-key style agent loop — native Anthropic tool_use.
 				if rot.ProfileCount() > 0 {
 					rot.EnsureUsableActive()
 				}
@@ -378,4 +421,26 @@ func anthropicRequestHasTools(body []byte) bool {
 		return false
 	}
 	return len(wrap.Tools) > 0
+}
+
+// scrubOutboundBody rewrites r.Body in place, replacing secrets with samples
+// before httputil.ReverseProxy dials the upstream. Safe to call repeatedly.
+func scrubOutboundBody(r *http.Request) {
+	if r == nil || r.Body == nil || r.Method == http.MethodGet || r.Method == http.MethodHead {
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
+	_ = r.Body.Close()
+	if err != nil {
+		r.Body = io.NopCloser(bytes.NewReader(nil))
+		r.ContentLength = 0
+		return
+	}
+	if scrubbed, res := privacy.ScrubBytes(body); res.Len() > 0 {
+		body = scrubbed
+		privacy.LogHits(r, res, "claude")
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	r.Header.Set("Content-Length", strconv.Itoa(len(body)))
 }

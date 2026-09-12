@@ -6,21 +6,24 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
+	"unicode/utf8"
 
+	"amux-accounts/pkg/monitor"
 	"amux-accounts/pkg/provider"
 	"amux-accounts/pkg/router"
+	"amux-accounts/pkg/term"
 	"amux-accounts/pkg/types"
 )
 
-// CmdChat runs a standalone terminal chat session backed by the pool router.
-// A leading "--provider <id>" (or "-p <id>") pins the session to that one
-// pool adapter instead of the whole pool with failover.
+// CmdChat runs a Claude-Code-like terminal chat session backed by the pool.
+// Flags: --provider/-p <id> pins one adapter.
 func CmdChat(args []string) {
 	providerID, args := extractProviderFlag(args)
 
 	adapters, _ := provider.LoadAccounts(provider.DefaultAccountsPath())
 	if len(adapters) == 0 {
-		fmt.Println("No providers in pool. Run `am login chatgpt` or `am login gemini` (or add an API key).")
+		term.Warn("No providers in pool. Run `am login chatgpt` or `am login gemini`.")
 		return
 	}
 	if providerID != "" {
@@ -33,7 +36,7 @@ func CmdChat(args []string) {
 			}
 		}
 		if match == nil {
-			fmt.Printf("No provider %q in pool. Available: %s\n", providerID, strings.Join(ids, ", "))
+			term.Error("No provider %q. Available: %s", providerID, strings.Join(ids, ", "))
 			return
 		}
 		adapters = []types.ProviderAdapter{match}
@@ -42,18 +45,24 @@ func CmdChat(args []string) {
 	pool := router.NewAccountPoolRouter(adapters)
 	var history []types.ChatMessage
 
-	fmt.Println("=== am interactive chat ===")
-	fmt.Println("Type your message. Type 'exit' or Ctrl+D to quit.")
-	fmt.Println()
+	ids := make([]string, 0, len(adapters))
+	for _, a := range adapters {
+		ids = append(ids, a.ID())
+	}
+
+	term.SetQuiet(true)
+	defer term.SetQuiet(false)
+
+	printChatSplash(ids)
 
 	if len(args) > 0 {
-		prompt := strings.Join(args, " ")
-		runChatTurn(pool, &history, prompt)
+		runClaudeTurn(pool, &history, strings.Join(args, " "))
 	}
 
 	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for {
-		fmt.Print("\nuser > ")
+		printUserPrompt()
 		if !scanner.Scan() {
 			break
 		}
@@ -61,17 +70,177 @@ func CmdChat(args []string) {
 		if line == "" {
 			continue
 		}
-		if line == "exit" || line == "quit" {
+		if line == "exit" || line == "quit" || line == "/exit" {
 			break
 		}
-
-		runChatTurn(pool, &history, line)
+		if line == "/clear" {
+			history = nil
+			fmt.Print("\x1b[H\x1b[2J")
+			printChatSplash(ids)
+			continue
+		}
+		if line == "/help" {
+			printChatHelp()
+			continue
+		}
+		runClaudeTurn(pool, &history, line)
 	}
-	fmt.Println("\nBye!")
+	fmt.Println()
+	fmt.Println(term.Dim("  bye"))
 }
 
-// extractProviderFlag pulls a leading "--provider <id>" or "-p <id>" out of
-// args, returning the id (empty if absent) and the remaining args.
+func printChatSplash(providerIDs []string) {
+	fmt.Println()
+	term.LogoSmall()
+	fmt.Println()
+	n := len(providerIDs)
+	fmt.Printf("  %s  %s\n",
+		term.Dim("chat"),
+		term.Dim(fmt.Sprintf("%d provider%s · /help · exit", n, plural(n))),
+	)
+	fmt.Println(term.Cyan("  " + strings.Repeat("-", 42)))
+	fmt.Println()
+}
+
+func printChatHelp() {
+	fmt.Println()
+	fmt.Println(term.Dim("  /clear   reset conversation"))
+	fmt.Println(term.Dim("  /help    this help"))
+	fmt.Println(term.Dim("  exit     quit"))
+	fmt.Println(term.Dim("  -p id    pin provider (amux chat -p claudeweb:01)"))
+	fmt.Println()
+}
+
+func printUserPrompt() {
+	// Fixed-width role label so cursor lines up every turn.
+	fmt.Print(term.Cyan(term.Bold(padRole("you"))) + term.Dim(" › "))
+}
+
+func printAssistantHeader(who string) {
+	fmt.Println()
+	fmt.Printf("%s %s\n",
+		term.Green(term.Bold(padRole("amux"))),
+		term.Dim("· "+who),
+	)
+	fmt.Print(term.Green("│ "))
+}
+
+func printAssistantFooter(d time.Duration) {
+	fmt.Println()
+	fmt.Println(term.Dim(fmt.Sprintf("%s %s", padRole(""), d.Round(10*time.Millisecond))))
+	fmt.Println()
+}
+
+func padRole(s string) string {
+	// "amux" / "you " — 4 runes wide for column alignment.
+	const w = 4
+	n := utf8.RuneCountInString(s)
+	if n >= w {
+		return s
+	}
+	return s + strings.Repeat(" ", w-n)
+}
+
+func runClaudeTurn(pool *router.AccountPoolRouter, history *[]types.ChatMessage, prompt string) {
+	*history = append(*history, types.ChatMessage{Role: "user", Content: prompt})
+
+	req := &types.ChatRequest{
+		Model:         "default",
+		Messages:      *history,
+		Stream:        true,
+		FullContext:   true,
+		ClientDialect: "chat",
+	}
+
+	started := time.Now()
+	ctx := context.Background()
+	ch, err := pool.Send(ctx, req)
+	if err != nil {
+		*history = (*history)[:len(*history)-1]
+		fmt.Println()
+		fmt.Println(term.Red(padRole("err!")) + " " + err.Error())
+		fmt.Println()
+		monitor.AppendRequest(types.RequestEntry{
+			Time: time.Now(), Dialect: "chat", Account: pool.LastUsed(),
+			Input: prompt, Error: err.Error(), DurationMs: time.Since(started).Milliseconds(),
+		})
+		return
+	}
+
+	who := pool.LastUsed()
+	if who == "" {
+		who = "assistant"
+	}
+	printAssistantHeader(who)
+
+	var full strings.Builder
+	var tools []string
+	streamErr := ""
+	for chunk := range ch {
+		if chunk.Error != nil {
+			streamErr = chunk.Error.Error()
+			break
+		}
+		if len(chunk.ToolCalls) > 0 {
+			for _, tc := range chunk.ToolCalls {
+				tools = append(tools, tc.Name)
+			}
+		}
+		if chunk.Content == "" {
+			continue
+		}
+		text := chunk.Content
+		// Indent wrapped lines under the assistant gutter.
+		if strings.Contains(text, "\n") {
+			parts := strings.Split(text, "\n")
+			for i, p := range parts {
+				if i > 0 {
+					fmt.Print("\n" + term.Green("│ "))
+				}
+				fmt.Print(p)
+			}
+		} else {
+			fmt.Print(text)
+		}
+		full.WriteString(chunk.Content)
+	}
+	fmt.Println()
+	if len(tools) > 0 {
+		fmt.Println(term.Dim(padRole("") + " tools · " + strings.Join(tools, ", ")))
+	}
+	printAssistantFooter(time.Since(started))
+
+	if streamErr != "" {
+		fmt.Println(term.Red(padRole("err!")) + " " + streamErr)
+		fmt.Println()
+	}
+
+	out := full.String()
+	if out != "" {
+		*history = append(*history, types.ChatMessage{Role: "assistant", Content: out})
+	} else if streamErr == "" {
+		*history = (*history)[:len(*history)-1]
+	}
+
+	monitor.AppendRequest(types.RequestEntry{
+		Time:       time.Now(),
+		Dialect:    "chat",
+		Account:    who,
+		Input:      prompt,
+		Output:     out,
+		DurationMs: time.Since(started).Milliseconds(),
+		Error:      streamErr,
+		StopReason: "end_turn",
+	})
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
 func extractProviderFlag(args []string) (id string, rest []string) {
 	for i := 0; i < len(args); i++ {
 		if (args[i] == "--provider" || args[i] == "-p") && i+1 < len(args) {
@@ -82,47 +251,4 @@ func extractProviderFlag(args []string) (id string, rest []string) {
 		}
 	}
 	return "", args
-}
-
-func runChatTurn(pool *router.AccountPoolRouter, history *[]types.ChatMessage, prompt string) {
-	*history = append(*history, types.ChatMessage{Role: "user", Content: prompt})
-
-	req := &types.ChatRequest{
-		Model:    "default",
-		Messages: *history,
-		Stream:   true,
-	}
-
-	ctx := context.Background()
-	ch, err := pool.Send(ctx, req)
-	if err != nil {
-		if strings.Contains(err.Error(), "rate limit") {
-			fmt.Printf("\n[Rate limit — Claude free/web giới hạn tin nhắn. Đợi 1–2 phút hoặc dùng geminiapi / Pro.]\n")
-			fmt.Printf("[%v]\n", err)
-			// Drop the user turn so retrying the same question doesn't stack history.
-			*history = (*history)[:len(*history)-1]
-			return
-		}
-		fmt.Printf("\n[Error: %v]\n", err)
-		*history = (*history)[:len(*history)-1]
-		return
-	}
-
-	fmt.Print("\nassistant > ")
-	var full strings.Builder
-	for chunk := range ch {
-		if chunk.Error != nil {
-			fmt.Printf("\n[Stream Error: %v]\n", chunk.Error)
-			break
-		}
-		if chunk.Content != "" {
-			fmt.Print(chunk.Content)
-			full.WriteString(chunk.Content)
-		}
-	}
-	fmt.Println()
-
-	if full.Len() > 0 {
-		*history = append(*history, types.ChatMessage{Role: "assistant", Content: full.String()})
-	}
 }

@@ -16,19 +16,8 @@ import (
 	"amux-accounts/pkg/profile"
 )
 
-// proxyAddr is the address clients should reach the proxy on: AM_PROXY_ADDR
-// if set, else the same "127.0.0.1:8787" default pkg/cli/cli.go's "proxy"
-// case binds to when --addr isn't passed.
-func proxyAddr() string {
-	addr := os.Getenv("AM_PROXY_ADDR")
-	if addr == "" {
-		addr = "127.0.0.1:8787"
-	}
-	return addr
-}
-
 func ProxyBase() string {
-	return "http://" + proxyAddr()
+	return "http://" + ProxyAddr()
 }
 
 func ProxyUp() bool {
@@ -41,15 +30,6 @@ func ProxyUp() bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-// resolveAMBin finds the am binary to re-exec for a detached child process
-// (the proxy server itself, or its supervisor). Prefers the currently
-// running executable's own path: it's guaranteed to be a binary that just
-// ran successfully (this call), whereas a stray, stale, or otherwise broken
-// "am" earlier on PATH would get spawned instead and could fail every time
-// (observed: a leftover ~/.local/bin/am got signal-killed on every exec in
-// one environment, silently sending the supervisor into an unbreakable
-// crash-loop). Falls back to PATH only if the running executable's path
-// can't be determined.
 func resolveAMBin() (string, error) {
 	if self, err := os.Executable(); err == nil {
 		return self, nil
@@ -60,9 +40,6 @@ func resolveAMBin() (string, error) {
 	return "", fmt.Errorf("could not resolve am binary")
 }
 
-// proxyStatusMode returns the "mode" field from a running proxy's
-// /_am/status ("degraded" when RunSupervisor's crash-loop fallback is
-// serving instead of the full server; "" if unreachable or absent).
 func proxyStatusMode() string {
 	resp, err := http.Get(ProxyBase() + "/_am/status")
 	if err != nil {
@@ -78,22 +55,41 @@ func proxyStatusMode() string {
 	return s.Mode
 }
 
+// UpFlags controls `amux proxy up` / `amux proxy --public` behaviour.
+type UpFlags struct {
+	Threshold float64 // 0 → default / env
+	Public    *bool   // nil keep saved; non-nil persist + restart
+	Restart   bool    // force respawn even if already up
+}
+
 func CmdProxyUp(threshold ...float64) {
-	thresh := DefaultUsedThreshold
+	f := UpFlags{}
 	if len(threshold) > 0 && threshold[0] > 0 {
-		thresh = ParseUsedThreshold(threshold[0])
+		f.Threshold = threshold[0]
+	}
+	CmdProxyUpFlags(f)
+}
+
+func CmdProxyUpFlags(f UpFlags) {
+	thresh := DefaultUsedThreshold
+	if f.Threshold > 0 {
+		thresh = ParseUsedThreshold(f.Threshold)
 	} else if env := os.Getenv("AM_ROTATE_THRESHOLD"); env != "" {
-		if f, err := strconv.ParseFloat(env, 64); err == nil {
-			thresh = ParseUsedThreshold(f)
+		if v, err := strconv.ParseFloat(env, 64); err == nil {
+			thresh = ParseUsedThreshold(v)
 		}
 	}
 	SetUsedThreshold(thresh)
 
-	needSpawn := !ProxyUp()
+	if f.Public != nil {
+		if err := SaveBindPublic(*f.Public); err != nil {
+			fmt.Fprintf(os.Stderr, "amux: save bind preference: %v\n", err)
+		}
+		f.Restart = true
+	}
+
+	needSpawn := !ProxyUp() || f.Restart
 	if !needSpawn && proxyStatusMode() == "degraded" {
-		// A crash-looped supervisor (see RunSupervisor) left a bare
-		// Anthropic-direct listener bound to the port instead of the full
-		// server. Ask it to step aside and spawn a fresh supervised one.
 		postAndClose(ProxyBase() + "/_am/shutdown")
 		deadline := time.Now().Add(2 * time.Second)
 		for time.Now().Before(deadline) && ProxyUp() {
@@ -101,18 +97,24 @@ func CmdProxyUp(threshold ...float64) {
 		}
 		needSpawn = true
 	}
+	if f.Restart && ProxyUp() {
+		postAndClose(ProxyBase() + "/_am/shutdown")
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) && ProxyUp() {
+			time.Sleep(50 * time.Millisecond)
+		}
+		needSpawn = true
+	}
+
+	listen := ListenAddr()
 	if needSpawn {
 		bin, err := resolveAMBin()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "amux: %v\n", err)
 			return
 		}
-		// Pass --addr / --threshold explicitly so the spawned supervisor
-		// binds the same address CmdProxyUp/ProxyUp just checked and
-		// inherits the rotate threshold (AM_PROXY_ADDR / AM_ROTATE_THRESHOLD
-		// alone aren't enough — child argv is the source of truth).
 		cmd := exec.Command(bin, "proxy", "--supervise",
-			"--addr", proxyAddr(),
+			"--addr", listen,
 			"--threshold", strconv.FormatFloat(thresh*100, 'f', -1, 64),
 		)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -120,31 +122,33 @@ func CmdProxyUp(threshold ...float64) {
 			fmt.Fprintf(os.Stderr, "amux: start proxy: %v\n", err)
 			return
 		}
-		deadline := time.Now().Add(3 * time.Second)
+		deadline := time.Now().Add(4 * time.Second)
 		for time.Now().Before(deadline) {
 			if ProxyUp() {
 				break
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
+		if !ProxyUp() {
+			fmt.Fprintf(os.Stderr, "amux: proxy did not come up on %s (clients: %s)\n", listen, ProxyAddr())
+			return
+		}
 	}
 
 	ppid := os.Getppid()
 	if ppid > 1 {
-		// Send both the current ("event") and legacy ("op") param names: a
-		// background `am proxy` process started by an older `am` binary
-		// (still running, unaffected by upgrading the binary on disk) only
-		// understands "op". Sending both means this hook doesn't silently
-		// stop tracking sessions against a stale proxy after an upgrade.
 		postAndClose(fmt.Sprintf("%s/_am/session?pid=%d&event=start&op=start", ProxyBase(), ppid))
 	}
 	postAndClose(ProxyBase() + "/_am/sync")
+
+	if IsPublic() || IsPublicBind(listen) {
+		fmt.Printf("amux proxy up  bind %s  local %s\n", listen, ProxyBase())
+		fmt.Printf("  public  %s\n", FormatPublicHosts())
+	} else if f.Restart || needSpawn {
+		fmt.Printf("amux proxy up  bind %s  %s\n", listen, ProxyBase())
+	}
 }
 
-// Sync hot-reloads the running proxy daemon's provider pool (and active
-// profile) from disk, if one is up. No-op when the proxy isn't running —
-// callers that also mutate accounts.json/profiles directly on disk don't
-// need to do anything else, the next `am proxy up` picks up the change too.
 func Sync() {
 	if ProxyUp() {
 		postAndClose(ProxyBase() + "/_am/sync")
@@ -200,8 +204,6 @@ func CmdProxyDown(force, yesIKnow bool) {
 
 	ppid := os.Getppid()
 	if ppid > 1 {
-		// See CmdProxyUp: send both param names for the same stale-proxy
-		// reason.
 		postAndClose(fmt.Sprintf("%s/_am/session?pid=%d&event=end&op=end", ProxyBase(), ppid))
 		return
 	}
@@ -216,14 +218,12 @@ func CmdSwitch(tool, name string) {
 		}
 		return
 	}
-
 	if !ProxyUp() {
 		if err := profile.CmdUse(tool, name); err != nil {
 			fmt.Fprintf(os.Stderr, "amux: %v\n", err)
 		}
 		return
 	}
-
 	resp, err := http.Post(ProxyBase()+"/_am/switch?to="+url.QueryEscape(name), "", nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "amux: proxy switch: %v\n", err)

@@ -18,6 +18,7 @@ import (
 
 	"amux-accounts/pkg/env"
 	"amux-accounts/pkg/hook"
+	"amux-accounts/pkg/monitor"
 	"amux-accounts/pkg/profile"
 	"amux-accounts/pkg/provider"
 	"amux-accounts/pkg/proxy"
@@ -48,8 +49,11 @@ Account Profiles:
   amux restore --backup       re-import latest auto-backup
   amux sw                     interactive account & provider picker (↑/↓, Enter)
   amux sw <id|name|provider>  switch to a specific account or LLM provider
+  amux off <id|name>          disable a Claude profile (skip auto-rotate + block am sw)
+  amux on <id|name>           re-enable a Claude profile
   amux current [tool]         print the currently active account on system
   amux status                 proxy state, rate limits (5h/7d), provider pool
+  amux watch                  live TUI: Dash · Accounts · Activity · Usage
 
 Multi-Provider Gateway & Plugins:
   amux login [provider] [--browser] [--token T] [--cookie C] [--refresh R] [--model M]
@@ -59,6 +63,7 @@ Multi-Provider Gateway & Plugins:
   amux doctor providers     live 1-turn probe of every pool adapter (OK/FAIL)
   amux accounts               list multi-provider accounts in pool, sorted by priority
   amux accounts rm <id>       remove a pool account (same as: amux api rm)
+  amux accounts off|on <id>   remove/add from rotate pool (still callable via X-Provider)
   amux accounts priority <id> <N>
                             set a pool account's priority (lower = tried first); hot-reloads
                             a running proxy, no restart needed
@@ -73,7 +78,7 @@ Multi-Provider Gateway & Plugins:
                             pins the session to one pool account instead of the whole pool
 
   Note: once a codex profile is logged in (amux add codex), its ChatGPT-subscription
-  token is automatically reused as an extra pool adapter (codexcli:NN, type codex_cli) —
+  token is automatically reused as an extra pool adapter (codex:NN, type codex_cli) —
   no separate login needed. It calls an undocumented ChatGPT backend endpoint the same
   way this CLI's other *-web adapters do, so it may break if OpenAI changes that API.
 
@@ -101,12 +106,22 @@ func Run(rawArgs []string) {
 		return
 	}
 
+	monitor.EnableTermSink()
+
 	// One-time (cheap-after-first-run) migration of the old fixed-literal
 	// pool provider IDs (claude-web, chatgpt-web, ...) to the unified
 	// "<prefix>:<NN>" format. Runs before dispatch so every subcommand sees
 	// already-migrated IDs.
 	if err := provider.MigrateLegacyIDs(provider.DefaultAccountsPath()); err != nil {
 		fmt.Fprintf(os.Stderr, "amux: warning: could not migrate account IDs: %v\n", err)
+	} else {
+		// Reload in-memory pool if proxy already up (IDs may have changed).
+		proxy.Sync()
+	}
+	if removed, err := provider.DeduplicateProvidersByCredential(provider.DefaultAccountsPath()); err != nil {
+		fmt.Fprintf(os.Stderr, "amux: warning: could not dedupe credentials: %v\n", err)
+	} else if len(removed) > 0 {
+		fmt.Fprintf(os.Stderr, "amux: removed duplicate credential providers: %s\n", strings.Join(removed, ", "))
 	}
 
 	cmd := rawArgs[1]
@@ -182,11 +197,41 @@ func Run(rawArgs []string) {
 			proxy.CmdSwitchProvider(name)
 		} else {
 			resolved := resolveName(tool, name)
+			if profile.IsDisabled(tool, resolved) {
+				die("profile %q is off — run: am on %s", resolved, resolved)
+			}
 			proxy.CmdSwitch(tool, resolved)
 		}
 
+	case "off", "disable":
+		tool, name := toolAndName(args)
+		if name == "" {
+			die("usage: amux off <id|name>")
+		}
+		resolved := resolveName(tool, name)
+		if err := profile.SetDisabled(tool, resolved, true); err != nil {
+			die("%v", err)
+		}
+		proxy.Sync()
+		fmt.Printf("off %s/%s — auto-rotate and am sw will skip it (am on %s to restore)\n", tool, resolved, resolved)
+
+	case "on", "enable":
+		tool, name := toolAndName(args)
+		if name == "" {
+			die("usage: amux on <id|name>")
+		}
+		resolved := resolveName(tool, name)
+		if err := profile.SetDisabled(tool, resolved, false); err != nil {
+			die("%v", err)
+		}
+		proxy.Sync()
+		fmt.Printf("on %s/%s — available for rotate and am sw again\n", tool, resolved)
+
 	case "status", "st":
 		ui.CmdStatus()
+
+	case "watch", "dash", "dashboard":
+		ui.CmdWatch()
 
 	case "current":
 		tool := "claude"
@@ -363,7 +408,6 @@ func Run(rawArgs []string) {
 			die("%v", err)
 		}
 
-
 	case "feedback":
 		cmdFeedback(args)
 
@@ -465,12 +509,12 @@ func cmdLs(args []string) {
 		tools = []string{args[0]}
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tNAME\tACCOUNT\tACTIVE\tSAVED")
+	fmt.Fprintln(w, "ID\tNAME\tACCOUNT\tACTIVE\tOFF\tSAVED")
 	for _, tn := range tools {
 		active := profile.ReadActivePointer(tn)
 		profs := profile.ListProfiles(tn)
 		if len(profs) == 0 {
-			fmt.Fprintf(w, "%s\t(none — am add %s)\t\t\t\n", tn, tn)
+			fmt.Fprintf(w, "%s\t(none — am add %s)\t\t\t\t\n", tn, tn)
 			continue
 		}
 		for _, p := range profs {
@@ -478,7 +522,11 @@ func cmdLs(args []string) {
 			if p.Name == active {
 				mark = "*"
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", p.ID, p.Name, orDash(p.Account), mark, p.Saved.Format("2006-01-02 15:04"))
+			off := ""
+			if p.Disabled {
+				off = "yes"
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", p.ID, p.Name, orDash(p.Account), mark, off, p.Saved.Format("2006-01-02 15:04"))
 		}
 	}
 	w.Flush()
@@ -627,7 +675,6 @@ func cmdRun(args []string) {
 	}
 	_ = syscall.Exec(bin, append([]string{tool}, rest...), environ)
 }
-
 
 func cmdSetup(args []string) {
 	autoUpdate := false

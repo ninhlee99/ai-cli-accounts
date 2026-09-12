@@ -6,27 +6,34 @@ import (
 
 	"amux-accounts/pkg/profile"
 	"amux-accounts/pkg/provider"
+	"amux-accounts/pkg/term"
 	"amux-accounts/pkg/types"
 	"golang.org/x/sys/unix"
-	"golang.org/x/term"
+	goterm "golang.org/x/term"
 )
 
 // PickProfile shows an arrow-key menu of profiles/providers and returns the chosen name.
 func PickProfile(tool string) string {
-	profs := profile.ListProfiles(tool)
+	var profs []types.ProfileMeta
+	for _, p := range profile.ListProfiles(tool) {
+		if p.Disabled {
+			continue
+		}
+		profs = append(profs, p)
+	}
 	if tool == "claude" {
 		profs = append(profs, providerMenuEntries()...)
 	}
 	if len(profs) == 0 {
-		fmt.Fprintf(os.Stderr, "no %s profiles (add one: am add %s)\n", tool, tool)
+		term.Warn("no %s profiles (add one: am add %s)", tool, tool)
 		return ""
 	}
 	if len(profs) == 1 {
 		return profs[0].Name
 	}
 	fd := int(os.Stdin.Fd())
-	if !term.IsTerminal(fd) {
-		fmt.Fprintf(os.Stderr, "amux sw needs a name when not run in a terminal (e.g. amux sw %s1)\n", tool)
+	if !goterm.IsTerminal(fd) {
+		term.Warn("amux sw needs a name when not run in a terminal")
 		return ""
 	}
 
@@ -38,29 +45,41 @@ func PickProfile(tool string) string {
 		}
 	}
 
-	old, err := term.MakeRaw(fd)
+	old, err := goterm.MakeRaw(fd)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "raw mode: %v\n", err)
+		term.Error("raw mode: %v", err)
 		return ""
 	}
-	defer term.Restore(fd, old)
+	defer goterm.Restore(fd, old)
 
 	render := func() {
-		fmt.Fprintf(os.Stderr, "\r\x1b[Jpick a %s account  (↑/↓, Enter, q to cancel)\r\n", tool)
+		fmt.Fprintf(os.Stderr, "\r\x1b[J%s  %s\r\n",
+			term.CyanErr("amux sw"),
+			term.DimErr("↑/↓  Enter  q"),
+		)
 		for i, p := range profs {
-			marker := "  "
-			if i == cur {
-				marker = "> "
-			}
-			tag := ""
-			if p.Name == active {
-				tag = "  (current)"
-			}
 			acct := p.Account
 			if acct == "" {
 				acct = "-"
 			}
-			fmt.Fprintf(os.Stderr, "%s\x1b[1m%-8s\x1b[0m %s%s\r\n", marker, p.ID, acct, tag)
+			tag := ""
+			if p.Name == active {
+				tag = "  " + term.GreenErr("current")
+			}
+			if i == cur {
+				fmt.Fprintf(os.Stderr, "%s %s  %s%s\r\n",
+					term.CyanErr("❯"),
+					term.BoldErr(fmt.Sprintf("%-10s", p.ID)),
+					acct,
+					tag,
+				)
+			} else {
+				fmt.Fprintf(os.Stderr, "  %s  %s%s\r\n",
+					term.DimErr(fmt.Sprintf("%-10s", p.ID)),
+					term.DimErr(acct),
+					tag,
+				)
+			}
 		}
 		fmt.Fprintf(os.Stderr, "\x1b[%dA", len(profs)+1)
 	}
@@ -113,7 +132,10 @@ func providerMenuEntries() []types.ProfileMeta {
 			if !p.IsConfigured() {
 				continue
 			}
-			detail := p.BaseURL
+			detail := p.Account
+			if detail == "" {
+				detail = p.BaseURL
+			}
 			if detail == "" {
 				detail = p.Model
 			}

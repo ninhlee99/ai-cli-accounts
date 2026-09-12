@@ -30,6 +30,8 @@ type ProfileMeta struct {
 	Tool    string    `json:"tool"`
 	Account string    `json:"account"`
 	Saved   time.Time `json:"saved"`
+	// Disabled means auto-rotate and `am sw` skip this profile until `am on`.
+	Disabled bool `json:"disabled,omitempty"`
 	// ID is a short handle like "claude1", assigned by position when listed.
 	ID string `json:"-"`
 }

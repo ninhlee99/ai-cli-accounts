@@ -60,6 +60,87 @@ func TestProvider_ConfigCRUD(t *testing.T) {
 	}
 }
 
+func TestAddOrUpdateProvider_DuplicateAPIKeySkipped(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "accounts.json")
+
+	p1 := ProviderConfig{
+		ID: "geminiapi:01", Type: "gemini", Priority: 1,
+		APIKey: "sk-same-key", Model: "gemini-3.6-flash",
+	}
+	if err := AddOrUpdateProvider(cfgPath, p1); err != nil {
+		t.Fatalf("first add: %v", err)
+	}
+
+	// Same key, new id → skip
+	err := AddOrUpdateProvider(cfgPath, ProviderConfig{
+		ID: "geminiapi:02", Type: "gemini", Priority: 2,
+		APIKey: "sk-same-key", Model: "gemini-3.6-flash",
+	})
+	dup, ok := err.(*DuplicateAPIKeyError)
+	if !ok || dup.ExistingID != "geminiapi:01" {
+		t.Fatalf("expected DuplicateAPIKeyError geminiapi:01, got %v", err)
+	}
+	file, _ := LoadConfigFile(cfgPath)
+	if len(file.Providers) != 1 {
+		t.Fatalf("expected still 1 provider, got %d", len(file.Providers))
+	}
+
+	// Same id + same key → update in place OK
+	if err := AddOrUpdateProvider(cfgPath, ProviderConfig{
+		ID: "geminiapi:01", Type: "gemini", Priority: 9,
+		APIKey: "sk-same-key", Model: "gemini-2.5-pro",
+	}); err != nil {
+		t.Fatalf("self update: %v", err)
+	}
+
+	// env: ref resolving to same secret also blocked
+	os.Setenv("AM_TEST_DUP_KEY", "sk-same-key")
+	defer os.Unsetenv("AM_TEST_DUP_KEY")
+	err = AddOrUpdateProvider(cfgPath, ProviderConfig{
+		ID: "openrouter", Type: "openai_compatible", Priority: 3,
+		BaseURL: "https://openrouter.ai/api/v1/",
+		APIKey:  "env:AM_TEST_DUP_KEY",
+		Model:   "x",
+	})
+	if _, ok := err.(*DuplicateAPIKeyError); !ok {
+		t.Fatalf("expected DuplicateAPIKeyError for env ref, got %v", err)
+	}
+
+	// Different key OK
+	if err := AddOrUpdateProvider(cfgPath, ProviderConfig{
+		ID: "geminiapi:02", Type: "gemini", Priority: 2,
+		APIKey: "sk-other-key", Model: "gemini-3.6-flash",
+	}); err != nil {
+		t.Fatalf("different key: %v", err)
+	}
+}
+
+func TestDeduplicateProvidersByCredential_SessionKey(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "accounts.json")
+	_ = AddOrUpdateProvider(cfgPath, ProviderConfig{
+		ID: "claudeweb:01", Type: "claude_web", Priority: 1, SessionKey: "sk-ant-dup",
+	})
+	// Bypass AddOrUpdate to simulate legacy duplicates already on disk.
+	f, _ := LoadConfigFile(cfgPath)
+	f.Providers = append(f.Providers, ProviderConfig{
+		ID: "claudeweb:02", Type: "claude_web", Priority: 2, SessionKey: "sk-ant-dup",
+	})
+	_ = SaveConfigFile(cfgPath, f)
+
+	removed, err := DeduplicateProvidersByCredential(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 || removed[0] != "claudeweb:02" {
+		t.Fatalf("removed=%v", removed)
+	}
+	f, _ = LoadConfigFile(cfgPath)
+	if len(f.Providers) != 1 || f.Providers[0].ID != "claudeweb:01" {
+		t.Fatalf("providers=%+v", f.Providers)
+	}
+}
+
 func TestBuildConcatenatedPrompt(t *testing.T) {
 	// 1. Empty messages
 	if got := BuildConcatenatedPrompt(nil); got != "" {
@@ -178,8 +259,8 @@ func TestProvider_MigrateLegacyIDs(t *testing.T) {
 		t.Fatalf("LoadConfigFile failed: %v", err)
 	}
 	want := map[string]string{
-		"claude_web":        "claudeweb:01",
-		"chatgpt_web":       "chatgptweb:01",
+		"claude_web":        "claude:web:01",
+		"chatgpt_web":       "chatgpt:01",
 		"openai_compatible": "my-custom-provider", // untouched: not a legacy literal ID
 	}
 	for _, p := range got.Providers {
@@ -199,6 +280,32 @@ func TestProvider_MigrateLegacyIDs(t *testing.T) {
 	for i, p := range again.Providers {
 		if p.ID != got.Providers[i].ID {
 			t.Errorf("second migration changed ID: %q -> %q", got.Providers[i].ID, p.ID)
+		}
+	}
+}
+
+func TestProvider_MigrateCompactIDs(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "accounts.json")
+	f := &AccountsFile{Providers: []ProviderConfig{
+		{ID: "geminiapi:01", Type: "gemini", Priority: 1},
+		{ID: "claudeweb:01", Type: "claude_web", Priority: 2},
+		{ID: "openrouter", Type: "openai_compatible", Priority: 3},
+	}}
+	if err := SaveConfigFile(cfgPath, f); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateLegacyIDs(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := LoadConfigFile(cfgPath)
+	want := map[string]string{
+		"gemini":            "gemini:api:01",
+		"claude_web":        "claude:web:01",
+		"openai_compatible": "openrouter:api:01",
+	}
+	for _, p := range got.Providers {
+		if p.ID != want[p.Type] {
+			t.Errorf("%s: got %q want %q", p.Type, p.ID, want[p.Type])
 		}
 	}
 }
