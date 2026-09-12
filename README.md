@@ -28,8 +28,10 @@
 - 🌐 **Local AI Gateway (`:8787`):** Cung cấp endpoint chuẩn OpenAI (`http://127.0.0.1:8787/v1`) tương thích với Cursor, Continue, Cline, LangChain, SDK Python, Node.js...
 - 🧰 **Tool Mid-Layer (`pkg/tools`):** Chuyển đổi tool schema / tool_call giữa Claude Code, Cursor, Codex, Antigravity (Gemini) — Claude Code vẫn nhận `tool_use` và tự thực thi tool local.
 - 🛡️ **Multi-Provider Failover:** Tự động chuyển mạch dự phòng tức thì khi gặp lỗi 429 giữa các nhà cung cấp (GitHub Models, Gemini API, Groq, DuckDuckGo, Web Sessions) với cơ chế cooldown 30 phút.
+- 🔀 **Pool off/on + `X-Provider`:** `am accounts off|on` đưa account ra/vào rotate; vẫn gọi trực tiếp bằng header `X-Provider` / `X-Model`.
 - 🧠 **Context & Session Retention:** Giữ nguyên lịch sử hội thoại khi chuyển đổi tài khoản hoặc failover giữa các provider.
 - 📊 **Token Usage Analytics:** Đo lường chi tiết lượng token theo ngày, project, model và session kết nối.
+- 🧼 **Privacy scrub (`pkg/privacy`):** Redact email / API key / webhook / card… trên payload outbound trước khi lên upstream.
 - 🔐 **Bảo Mật Cao:** Tích hợp macOS Keychain và mã hóa AES-256-GCM / Scrypt để bảo vệ thông tin đăng nhập và token.
 
 ---
@@ -70,6 +72,7 @@ curl -fsSL https://raw.githubusercontent.com/ninhlee99/amux/main/install.sh | sh
 | Lệnh | Mô Tả |
 | :--- | :--- |
 | `am accounts` | Xem danh sách AI Provider trong pool và độ ưu tiên |
+| `am accounts off\|on <id>` / `am off\|on <id>` | Ra/vào rotate pool (vẫn gọi được qua `X-Provider`) |
 | `am login [provider]` | Đăng nhập tương tác Web/API (`chatgpt`, `claude`, `gemini`, `github`, `groq`) |
 | `am api add <tên> --endpoint <url> --api-key <key>` | Thêm endpoint chuẩn OpenAI tùy chỉnh vào pool |
 | `am api rm <tên>` / `am api ls` | Xoá hoặc xem danh sách provider API tùy chỉnh |
@@ -81,7 +84,7 @@ curl -fsSL https://raw.githubusercontent.com/ninhlee99/amux/main/install.sh | sh
 | `am setup [--auto-update]` | Cài đặt Claude hook, slash command & kích hoạt tự động cập nhật |
 | `am update` | Nâng cấp amux lên bản mới nhất từ GitHub (giữ nguyên toàn bộ tài khoản) |
 | `am status` | Xem trạng thái proxy daemon, auto-update, các tab kết nối và quota |
-| `am watch` | Dashboard TUI: Dash (overview) · Accounts · Logs · Usage · Requests |
+| `am watch` | Dashboard TUI: Dash · Accounts (nhóm) · Activity · Usage |
 | `am usage [day\|week\|month]` | Thống kê số lượng token sử dụng (thêm `-D` để xem chi tiết) |
 | `am proxy [up\|down]` | Khởi động hoặc dừng proxy daemon chạy nền |
 | `am env` | Xuất biến môi trường trỏ vào proxy (`eval "$(am env)"`) |
@@ -241,11 +244,13 @@ Log: `~/.am/events.log`, `~/.am/requests.log`.
 
 Hệ thống ưu tiên gọi các provider theo số thứ tự `priority` từ nhỏ đến lớn. Hỗ trợ bí danh `env:TEN_BIEN` để đọc key từ môi trường:
 
+ID thống nhất `brand[:method]:NN` (vd. `github:api:01`, `gemini:api:01`, `claude:web:01`). Legacy ID tự migrate khi chạy.
+
 ```json
 {
   "providers": [
     {
-      "id": "github-models",
+      "id": "github:api:01",
       "type": "openai_compatible",
       "priority": 1,
       "baseUrl": "https://models.github.ai/inference",
@@ -253,7 +258,7 @@ Hệ thống ưu tiên gọi các provider theo số thứ tự `priority` từ 
       "model": "gpt-4o"
     },
     {
-      "id": "google-ai-studio",
+      "id": "gemini:api:01",
       "type": "openai_compatible",
       "priority": 2,
       "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -261,7 +266,7 @@ Hệ thống ưu tiên gọi các provider theo số thứ tự `priority` từ 
       "model": "gemini-3.6-flash"
     },
     {
-      "id": "groq",
+      "id": "groq:api:01",
       "type": "openai_compatible",
       "priority": 3,
       "baseUrl": "https://api.groq.com/openai/v1",
@@ -269,7 +274,7 @@ Hệ thống ưu tiên gọi các provider theo số thứ tự `priority` từ 
       "model": "llama-3.3-70b-versatile"
     },
     {
-      "id": "duckduckgo",
+      "id": "duckduckgo:01",
       "type": "duckduckgo",
       "priority": 4,
       "model": "claude-3-haiku-20240307"
