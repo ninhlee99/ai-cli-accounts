@@ -65,3 +65,35 @@ func TestRotate_SkipsDisabled(t *testing.T) {
 		t.Fatal("rotate must not select disabled b")
 	}
 }
+
+// TestToken_DisabledSoleProfile reproduces the reported bug: a user turns
+// off their only Claude subscription profile, expecting it to never be used
+// again — even if no other Claude profile exists to fail over to. Token()
+// must return "" rather than silently falling back to the disabled
+// profile's live keychain credentials, and ProfileCount() must not count it
+// as an available option (so callers correctly treat Claude as unusable and
+// fail over to the provider pool, or fail cleanly, instead of leaking a
+// request through the off subscription).
+func TestToken_DisabledSoleProfile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AM_HOME", dir)
+	tool := "claude"
+	_ = os.MkdirAll(profile.ProfileDir(tool), 0o700)
+	name := "only"
+	meta := types.ProfileMeta{Name: name, Tool: tool, Account: name + "@x.com", Saved: time.Now()}
+	b, _ := json.MarshalIndent(meta, "", "  ")
+	_ = os.WriteFile(filepath.Join(profile.ProfileDir(tool), name+".meta.json"), b, 0o600)
+	_ = os.WriteFile(filepath.Join(profile.ProfileDir(tool), name+".amp"), []byte("{}"), 0o600)
+	_ = profile.SetDisabled(tool, name, true)
+
+	r := NewRotator(tool)
+	if got := r.Token(); got != "" {
+		t.Fatalf("Token() for disabled sole profile = %q, want empty", got)
+	}
+	if n := r.ProfileCount(); n != 0 {
+		t.Fatalf("ProfileCount() = %d, want 0 (disabled profile must not count as usable)", n)
+	}
+	if err := r.ForceSwitchExplicit(name); err == nil {
+		t.Fatal("ForceSwitchExplicit must reject a disabled profile — X-Provider is not a bypass for `am off`")
+	}
+}

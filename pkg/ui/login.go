@@ -279,6 +279,16 @@ func loginClaude(f loginFlags) {
 		fmt.Printf("Signed in as %s.\n", accountEmail)
 	}
 
+	model := f.model
+	if model == "" {
+		if detected := provider.DetectClaudeWebModel(key, cookieHeader); detected != "" {
+			model = detected
+			fmt.Printf("Detected model: %s\n", model)
+		} else {
+			model = "claude-sonnet-5"
+		}
+	}
+
 	savePoolLogin("claude_web", accountEmail, func(slot provider.PoolSlot) provider.ProviderConfig {
 		return provider.ProviderConfig{
 			ID:         slot.ID,
@@ -288,7 +298,7 @@ func loginClaude(f loginFlags) {
 			Account:    accountEmail,
 			SessionKey: key,
 			Cookies:    cookieHeader,
-			Model:      coalesceModel(f.model, "claude-sonnet-5"),
+			Model:      model,
 		}
 	})
 }
@@ -345,7 +355,12 @@ func loginGemini(f loginFlags) {
 	}
 	model := f.model
 	if model == "" {
-		model = "gemini-3.6-flash"
+		if detected := provider.DetectGeminiModel(key); detected != "" {
+			model = detected
+			fmt.Printf("Detected model: %s\n", model)
+		} else {
+			model = "gemini-3.6-flash"
+		}
 	}
 	err := provider.AddOrUpdateProvider(provider.DefaultAccountsPath(), provider.ProviderConfig{
 		ID:       id,

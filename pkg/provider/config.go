@@ -1,6 +1,8 @@
 package provider
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -8,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"amux-accounts/pkg/auth"
 	"amux-accounts/pkg/profile"
 	"amux-accounts/pkg/types"
 )
@@ -59,8 +62,7 @@ type ProviderConfig struct {
 }
 
 // IsConfigured reports whether the provider has valid credentials and is in
-// the rotate pool (Enabled != false). Out-of-pool accounts still have
-// credentials via HasCredentials and can be addressed with X-Provider.
+// the rotate pool (Enabled != false).
 func (p ProviderConfig) IsConfigured() bool {
 	if !p.InRotatePool() {
 		return false
@@ -440,13 +442,17 @@ func LoadAccounts(path string) ([]types.ProviderAdapter, error) {
 	return loadAccounts(path, true)
 }
 
-// LoadAllAddressable returns every adapter with credentials, including those
-// removed from the rotate pool (Enabled:false). Used for X-Provider routing.
+// LoadAllAddressable returns every adapter with credentials that is not
+// turned off (Enabled != false) — including ones outside the priority
+// rotate order, so X-Provider can still pin to a specific enabled account.
+// A disabled ("am off") provider is never returned here: off must mean off
+// for every path (auto-rotate, X-Provider, force-switch), not just rotation.
 func LoadAllAddressable(path string) ([]types.ProviderAdapter, error) {
 	return loadAccounts(path, false)
 }
 
-// LookupAdapter builds one adapter by ID even when out of the rotate pool.
+// LookupAdapter builds one adapter by ID, even when out of the priority
+// rotate order — but never for a disabled ("am off") provider.
 func LookupAdapter(path, id string) (types.ProviderAdapter, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -468,12 +474,18 @@ func loadAccounts(path string, rotateOnly bool) ([]types.ProviderAdapter, error)
 	var adapters []types.ProviderAdapter
 
 	var providers []ProviderConfig
-	b, err := os.ReadFile(path)
+	b, err := readAccountsFileBytes(path)
 	if err == nil {
 		var f AccountsFile
 		if err := json.Unmarshal(b, &f); err == nil {
 			providers = f.Providers
 			for _, p := range f.Providers {
+				// A disabled ("am off") provider is never addressable, in
+				// or out of the rotate pool — X-Provider must not be a way
+				// to reach an account the user turned off.
+				if !p.InRotatePool() {
+					continue
+				}
 				if rotateOnly {
 					if !p.IsConfigured() {
 						continue
@@ -589,7 +601,7 @@ func codexPoolID() string {
 }
 
 func LoadConfigFile(path string) (*AccountsFile, error) {
-	b, err := os.ReadFile(path)
+	b, err := readAccountsFileBytes(path)
 	if err != nil {
 		return &AccountsFile{}, err
 	}
@@ -606,7 +618,50 @@ func SaveConfigFile(path string, f *AccountsFile) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(b, '\n'), 0o600)
+	return writeAccountsFileBytes(path, append(b, '\n'))
+}
+
+// accountsFileMagic tags an encrypted-at-rest accounts.json so it can be
+// told apart from the legacy plaintext format (which always starts with
+// '{'). Credentials in this file (API keys, session tokens, cookies) sit on
+// disk for as long as the account is configured, unlike the .amp export
+// bundle (already AES-GCM sealed via pkg/auth) — so it gets the same
+// protection instead of relying on file mode 0600 alone.
+var accountsFileMagic = []byte("AMENC1:")
+
+// readAccountsFileBytes returns the plaintext JSON for path, transparently
+// decrypting if the file was written by writeAccountsFileBytes. A file that
+// predates this encryption (starts with plaintext JSON) is returned as-is —
+// it gets encrypted on the next SaveConfigFile.
+func readAccountsFileBytes(path string) ([]byte, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.HasPrefix(b, accountsFileMagic) {
+		return b, nil
+	}
+	enc := b[len(accountsFileMagic):]
+	dec, err := base64.StdEncoding.DecodeString(string(bytes.TrimSpace(enc)))
+	if err != nil {
+		return nil, fmt.Errorf("decode accounts file: %w", err)
+	}
+	plain, err := auth.Decrypt(dec)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt accounts file: %w", err)
+	}
+	return plain, nil
+}
+
+// writeAccountsFileBytes encrypts plain (a full accounts.json document) with
+// the machine's master key before writing it to path.
+func writeAccountsFileBytes(path string, plain []byte) error {
+	enc, err := auth.Encrypt(plain)
+	if err != nil {
+		return fmt.Errorf("encrypt accounts file: %w", err)
+	}
+	out := append(append([]byte{}, accountsFileMagic...), []byte(base64.StdEncoding.EncodeToString(enc))...)
+	return os.WriteFile(path, out, 0o600)
 }
 
 // sameSecret reports whether two stored credential fields refer to the same

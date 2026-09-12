@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"amux-accounts/pkg/hook"
 	"amux-accounts/pkg/profile"
 )
 
@@ -165,6 +166,7 @@ func CmdProxyUpFlags(f UpFlags) {
 		postAndClose(fmt.Sprintf("%s/_am/session?pid=%d&event=start&op=start", ProxyBase(), ppid))
 	}
 	postAndClose(ProxyBase() + "/_am/sync")
+	hook.SyncLaunchctlEnv(true, ProxyBase())
 
 	if IsPublic() || IsPublicBind(listen) {
 		fmt.Printf("amux proxy up  bind %s  local %s\n", listen, ProxyBase())
@@ -223,6 +225,7 @@ func CmdProxyDown(force, yesIKnow bool) {
 			}
 		}
 		postAndClose(ProxyBase() + "/_am/shutdown")
+		hook.SyncLaunchctlEnv(false, "")
 		fmt.Println("amux proxy stopped")
 		return
 	}
@@ -233,6 +236,7 @@ func CmdProxyDown(force, yesIKnow bool) {
 		return
 	}
 	postAndClose(ProxyBase() + "/_am/shutdown")
+	hook.SyncLaunchctlEnv(false, "")
 	fmt.Println("amux proxy stopped")
 }
 

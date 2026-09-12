@@ -88,9 +88,11 @@ Monitoring & Utilities:
   amux usage [day|week|month|all] [-D|--detail] [-d YYYY-MM-DD] [-p PROJECT]
                             token usage analytics
   amux run <tool> [args...]   exec tool (currently: claude) routed through the proxy
-  amux proxy [up|down] [--public] [-b|--addr HOST] [-p|--port N] [--threshold N]
+  amux proxy [up|down|token] [--public] [-b|--addr HOST] [-p|--port N] [--threshold N]
                             run/manage proxy daemon (default 127.0.0.1:8787;
                             --public binds 0.0.0.0; -p/--port overrides port)
+                            --public requires an admin token for non-loopback
+                            requests — 'amux proxy token' prints/generates it
                             --threshold N  auto-switch Claude account when 5h/7d
                             utilization >= N% (default 95). Also: AM_ROTATE_THRESHOLD
   amux env [--public]         print export ANTHROPIC_BASE_URL=... for eval "$(amux env)";
@@ -367,6 +369,13 @@ func Run(rawArgs []string) {
 				}
 				proxy.CmdProxyDown(force, yes)
 				return
+			case "token":
+				tok, err := proxy.LoadOrCreateAuthToken()
+				if err != nil {
+					die("proxy token: %v", err)
+				}
+				fmt.Println(tok)
+				return
 			}
 		}
 		addr := proxy.ResolveListenAddr(proxyListenFromArgs(args))
@@ -476,6 +485,13 @@ func toolAndName(rest []string) (tool, name string) {
 	}
 	joined := strings.Join(rest, " ")
 	if prefix, _, ok := types.ParseID(joined); ok {
+		// Legacy flat prefixes (codexcli, geminicli, ...) migrate to their
+		// current unified-ID prefix (codex, antigravity, ...) before
+		// matching against IDPrefixForTool, which only ever returns the
+		// unified form.
+		if migrated, hit := types.CompactPrefixMigrate[prefix]; hit {
+			prefix = migrated
+		}
 		for t := range tools {
 			if profile.IDPrefixForTool(t) == prefix {
 				return t, joined
@@ -751,6 +767,17 @@ func cmdHookInstall() {
 		die("hook install: %v", err)
 	}
 	fmt.Printf("installed hooks in %s\n  SessionStart -> amux proxy up\n  SessionEnd   -> amux proxy down\n  Stop         -> amux proxy down\n\n", hook.ClaudeSettingsPath())
+
+	// GUI-launched clients (Dock icon, IDE integration) never source shell
+	// rc, so they'd miss ANTHROPIC_BASE_URL even with the rc line below —
+	// mirror the same var into the macOS session env as a fallback.
+	proxyUp := proxy.ProxyUp()
+	hook.SyncLaunchctlEnv(proxyUp, proxy.ProxyBase())
+	if proxyUp {
+		fmt.Println("launchctl: mirrored ANTHROPIC_BASE_URL into macOS session env (proxy up)")
+	} else {
+		fmt.Println("launchctl: cleared ANTHROPIC_BASE_URL from macOS session env (proxy not running — GUI apps will use the real Anthropic API)")
+	}
 
 	line := `eval "$(am env)"`
 	rc := hook.ShellRC()

@@ -36,10 +36,13 @@ type ClaudeWebAdapter struct {
 }
 
 const (
-	claudeWebOrganizationsURL = "https://claude.ai/api/organizations"
 	claudeWebConversationBase = "https://claude.ai/api/organizations/%s/chat_conversations"
 	claudeWebDefaultModel     = "claude-sonnet-5"
 )
+
+// claudeWebOrganizationsURL is a var (not const) so tests can point it at an
+// httptest server instead of the real claude.ai endpoint.
+var claudeWebOrganizationsURL = "https://claude.ai/api/organizations"
 
 func (a *ClaudeWebAdapter) ID() string    { return a.AdapterID }
 func (a *ClaudeWebAdapter) Priority() int { return a.PriorityLvl }
@@ -379,6 +382,62 @@ func (a *ClaudeWebAdapter) getOrganizationID(ctx context.Context) (string, error
 		return "", fmt.Errorf("%s: no organization found", a.AdapterID)
 	}
 	return orgs[0].UUID, nil
+}
+
+// DetectClaudeWebModel queries claude.ai/api/organizations with a signed-in
+// session and returns the best model that account's plan capabilities allow
+// (Opus for pro/max/team, else Sonnet), or "" if capabilities can't be
+// determined — callers should fall back to their own hardcoded default,
+// never blocking login on this.
+func DetectClaudeWebModel(sessionKey, cookieHeader string) string {
+	cookie := strings.TrimSpace(cookieHeader)
+	sessionKey = strings.TrimSpace(sessionKey)
+	if cookie == "" {
+		if sessionKey == "" {
+			return ""
+		}
+		cookie = "sessionKey=" + sessionKey
+	} else if sessionKey != "" && !strings.Contains(cookie, "sessionKey=") {
+		cookie = "sessionKey=" + sessionKey + "; " + cookie
+	}
+
+	req, err := http.NewRequest(http.MethodGet, claudeWebOrganizationsURL, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Cookie", cookie)
+	req.Header.Set("Accept", "application/json")
+	setClaudeWebHeaders(req, false)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	var orgs []struct {
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&orgs); err != nil || len(orgs) == 0 {
+		return ""
+	}
+	return pickClaudeWebModel(orgs[0].Capabilities)
+}
+
+// pickClaudeWebModel maps an organization's capabilities (from
+// claude.ai/api/organizations) to the best model that plan can use.
+func pickClaudeWebModel(capabilities []string) string {
+	for _, cap := range capabilities {
+		switch cap {
+		case "claude_pro", "claude_max", "claude_team", "claude_enterprise", "raven":
+			return "claude-opus-5"
+		}
+	}
+	return claudeWebDefaultModel
 }
 
 func (a *ClaudeWebAdapter) createConversation(ctx context.Context, orgID, model string) (string, error) {
