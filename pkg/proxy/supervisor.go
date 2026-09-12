@@ -74,13 +74,21 @@ func RunSupervisor(addr, upstream string, threshold float64) error {
 	rot := NewRotator("claude")
 	life := NewLifecycle()
 	var srv *http.Server
-	handler, err := newPassthroughHandler(rot, life, upstream, true, func() {
+	var handler http.Handler
+	handler, err = newPassthroughHandler(rot, life, upstream, true, func() {
 		if srv != nil {
 			_ = srv.Close()
 		}
 	})
 	if err != nil {
 		return err
+	}
+	if IsPublicBind(addr) {
+		token, terr := LoadOrCreateAuthToken()
+		if terr != nil {
+			return terr
+		}
+		handler = requireAuth(token, handler)
 	}
 	srv = &http.Server{Addr: addr, Handler: handler}
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

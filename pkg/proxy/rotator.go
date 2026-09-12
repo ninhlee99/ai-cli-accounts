@@ -192,7 +192,7 @@ func (r *Rotator) Token() string {
 		return ""
 	}
 	name := r.order[r.idx]
-	if r.dead[name] {
+	if r.dead[name] || r.disabled[name] {
 		r.mu.Unlock()
 		return ""
 	}
@@ -362,8 +362,26 @@ func (r *Rotator) AllUnavailable() bool {
 	return true
 }
 
-// ProfileCount returns how many Claude Code profiles the rotator knows about.
+// ProfileCount returns how many Claude Code profiles are usable — i.e. not
+// turned off (`am off`). A disabled profile must never be treated as an
+// available option by callers deciding whether Claude is "usable" (see
+// server.go's claudeUsable / usePool logic): off means off, even when it's
+// the only Claude profile the user has.
 func (r *Rotator) ProfileCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, name := range r.order {
+		if !r.disabled[name] {
+			n++
+		}
+	}
+	return n
+}
+
+// TotalProfileCount returns every Claude Code profile the rotator knows
+// about, including disabled ones — for display/status purposes only.
+func (r *Rotator) TotalProfileCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.order)
@@ -535,15 +553,17 @@ func (r *Rotator) Rotate(from, reason string) {
 // Rotate, this clears any cooldown/dead-refresh blacklist on the target,
 // since a human explicitly picking that account is vouching for it.
 func (r *Rotator) ForceSwitch(name string) error {
-	return r.forceSwitch(name, false)
+	return r.forceSwitch(name)
 }
 
-// ForceSwitchExplicit selects a profile for API X-Provider even if am off.
+// ForceSwitchExplicit selects a profile for API X-Provider routing. Off
+// profiles are still rejected — X-Provider is a routing hint, not a way to
+// bypass `am off`; the caller must fail over elsewhere (or error) instead.
 func (r *Rotator) ForceSwitchExplicit(name string) error {
-	return r.forceSwitch(name, true)
+	return r.forceSwitch(name)
 }
 
-func (r *Rotator) forceSwitch(name string, allowDisabled bool) error {
+func (r *Rotator) forceSwitch(name string) error {
 	r.snapshotActiveIfChanged()
 
 	r.mu.Lock()
@@ -564,7 +584,7 @@ func (r *Rotator) forceSwitch(name string, allowDisabled bool) error {
 		r.mu.Unlock()
 		return fmt.Errorf("no profile %q (have: %s)", name, strings.Join(order, ", "))
 	}
-	if r.disabled[name] && !allowDisabled {
+	if r.disabled[name] {
 		r.mu.Unlock()
 		return fmt.Errorf("profile %q is off — run: am on %s", name, name)
 	}

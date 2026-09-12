@@ -185,7 +185,11 @@ func AutoBackup() {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return
 	}
-	blob, err := SealBundle(b, auth.MasterKey(), false)
+	key, err := auth.MasterKey()
+	if err != nil {
+		return
+	}
+	blob, err := SealBundle(b, key, false)
 	if err != nil {
 		return
 	}
@@ -230,7 +234,11 @@ func CmdRestoreBackup(which string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("read backup: %w", err)
 	}
-	b, err := OpenBundle(strings.TrimSpace(string(blob)), auth.MasterKey(), false)
+	key, err := auth.MasterKey()
+	if err != nil {
+		return 0, err
+	}
+	b, err := OpenBundle(strings.TrimSpace(string(blob)), key, false)
 	if err != nil {
 		return 0, err
 	}

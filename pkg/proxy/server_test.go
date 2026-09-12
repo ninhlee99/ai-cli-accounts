@@ -50,7 +50,7 @@ func newTestHandler(t *testing.T) http.Handler {
 		http.Error(w, "unexpected reverse-proxy call in test", http.StatusTeapot)
 	})
 	sw := &swappableHandler{}
-	h := newHandler(rot, life, mode, pool, pool, rp, "https://api.anthropic.com", sw, func() {})
+	h := newHandler(rot, life, mode, pool, pool, rp, "https://api.anthropic.com", sw, "", func() {})
 	sw.Set(h)
 	return sw
 }
@@ -230,7 +230,7 @@ func newHandlerWithRotator(t *testing.T, rot *Rotator, poolAdapters []types.Prov
 		http.Error(w, "reverse-proxy", http.StatusTeapot)
 	})
 	sw := &swappableHandler{}
-	h := newHandler(rot, life, mode, pool, pool, rp, "https://api.anthropic.com", sw, func() {})
+	h := newHandler(rot, life, mode, pool, pool, rp, "https://api.anthropic.com", sw, "", func() {})
 	sw.Set(h)
 	return sw, nil
 }
@@ -316,7 +316,7 @@ func TestHandler_MessagesWithToolsUsesClaudeWhenUsable(t *testing.T) {
 		http.Error(w, "reverse-proxy", http.StatusTeapot)
 	})
 	sw := &swappableHandler{}
-	h := newHandler(rot, life, mode, pool, pool, rp, "https://api.anthropic.com", sw, func() {})
+	h := newHandler(rot, life, mode, pool, pool, rp, "https://api.anthropic.com", sw, "", func() {})
 	sw.Set(h)
 
 	body := `{"model":"claude-sonnet-4-20250514","tools":[{"name":"Bash","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hi"}]}`
@@ -353,7 +353,7 @@ func TestHandler_MessagesProviderModeNoToolsUsesPool(t *testing.T) {
 		http.Error(w, "reverse-proxy", http.StatusTeapot)
 	})
 	sw := &swappableHandler{}
-	h := newHandler(rot, life, mode, pool, pool, rp, "https://api.anthropic.com", sw, func() {})
+	h := newHandler(rot, life, mode, pool, pool, rp, "https://api.anthropic.com", sw, "", func() {})
 	sw.Set(h)
 
 	body := `{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"hi"}]}`
@@ -392,7 +392,7 @@ func TestHandler_ClaudeFailoverEmptyPoolUsesReverseProxy(t *testing.T) {
 		http.Error(w, "reverse-proxy", http.StatusTeapot)
 	})
 	sw := &swappableHandler{}
-	h := newHandler(rot, life, mode, empty, empty, rp, "https://api.anthropic.com", sw, func() {})
+	h := newHandler(rot, life, mode, empty, empty, rp, "https://api.anthropic.com", sw, "", func() {})
 	sw.Set(h)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
@@ -400,6 +400,38 @@ func TestHandler_ClaudeFailoverEmptyPoolUsesReverseProxy(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusTeapot {
 		t.Fatalf("expected Anthropic reverse-proxy, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandler_AllDeadNoPoolNoAPIKeyRefusesInsteadOfReverseProxy is the
+// requested guarantee: with every rotator account off/expired, no provider
+// pool configured, and no caller-supplied credential, /v1/messages must be
+// refused by the proxy itself (503) — it must never fall through to the
+// Anthropic reverse-proxy stub (which stands in for the real Anthropic API
+// here). Escaping to the real API is only correct once the proxy process
+// itself is stopped, never while it's up and simply out of accounts.
+func TestHandler_AllDeadNoPoolNoAPIKeyRefusesInsteadOfReverseProxy(t *testing.T) {
+	rot := &Rotator{
+		tool:           "claude",
+		order:          []string{"solo"},
+		tokens:         map[string]*types.Token{"solo": {Access: "tok"}},
+		accounts:       map[string]string{},
+		cooldown:       map[string]time.Time{},
+		dead:           map[string]bool{"solo": true},
+		disabled:       map[string]bool{},
+		autoSwitches:   map[string]int{},
+		manualSwitches: map[string]int{},
+		usedThreshold:  DefaultUsedThreshold,
+	}
+	h, _ := newHandlerWithRotator(t, rot, nil) // no pool adapters at all
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code == http.StatusTeapot {
+		t.Fatalf("must not escape to the Anthropic reverse-proxy when the pool is fully dead, got the reverse-proxy stub")
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 refusal, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

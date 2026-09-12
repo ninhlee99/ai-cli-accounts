@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 
@@ -17,28 +18,40 @@ const (
 )
 
 // MasterKey returns the 32-byte AES key, creating and storing one in the
-// system keychain on first use.
-func MasterKey() []byte {
+// system keychain on first use. A transient keychain error (locked,
+// daemon unreachable, ...) is returned as an error instead of silently
+// minting a fresh key — doing the latter would orphan any data already
+// encrypted under the real key (see the git history for the incident this
+// was written to prevent).
+func MasterKey() ([]byte, error) {
 	s, err := keyring.Get(keyringService, keyringUser)
 	if err == nil {
 		k, decErr := base64.StdEncoding.DecodeString(s)
 		if decErr == nil && len(k) == 32 {
-			return k
+			return k, nil
 		}
+		return nil, fmt.Errorf("stored master key is corrupt: %w", decErr)
+	}
+	if !errors.Is(err, keyring.ErrNotFound) {
+		return nil, fmt.Errorf("read master key from keychain: %w", err)
 	}
 	k := make([]byte, 32)
 	if _, err := rand.Read(k); err != nil {
-		panic(fmt.Sprintf("rand: %v", err))
+		return nil, fmt.Errorf("rand: %w", err)
 	}
 	if err := keyring.Set(keyringService, keyringUser, base64.StdEncoding.EncodeToString(k)); err != nil {
-		panic(fmt.Sprintf("store master key in keychain: %v", err))
+		return nil, fmt.Errorf("store master key in keychain: %w", err)
 	}
-	return k
+	return k, nil
 }
 
 // Encrypt encrypts plain bytes using AES-GCM with the master key.
 func Encrypt(plain []byte) ([]byte, error) {
-	block, err := aes.NewCipher(MasterKey())
+	key, err := MasterKey()
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("cipher: %w", err)
 	}
@@ -55,7 +68,11 @@ func Encrypt(plain []byte) ([]byte, error) {
 
 // Decrypt decrypts encrypted bytes using AES-GCM with the master key.
 func Decrypt(enc []byte) ([]byte, error) {
-	block, err := aes.NewCipher(MasterKey())
+	key, err := MasterKey()
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("cipher: %w", err)
 	}

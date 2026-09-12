@@ -109,11 +109,24 @@ func RunProxy(addr, upstream string) error {
 
 	sw := &swappableHandler{}
 	var srv *http.Server
-	handler := newHandler(rot, life, mode, pool, pool, rp, upstream, sw, func() {
+	var authToken string
+	if IsPublicBind(addr) {
+		token, err := LoadOrCreateAuthToken()
+		if err != nil {
+			return fmt.Errorf("generate admin token: %w", err)
+		}
+		authToken = token
+		term.LogProxy("public bind: admin token required for non-loopback requests (see: am proxy token)")
+	}
+	handler := newHandler(rot, life, mode, pool, pool, rp, upstream, sw, authToken, func() {
 		if srv != nil {
 			_ = srv.Close()
 		}
 	})
+	if authToken != "" {
+		handler = requireAuth(authToken, handler)
+	}
+
 	sw.Set(handler)
 	srv = &http.Server{Addr: addr, Handler: sw}
 
@@ -125,9 +138,28 @@ func RunProxy(addr, upstream string) error {
 	return nil
 }
 
+// hasCallerCredential reports whether the incoming request already carries
+// its own Anthropic credential (an API key, or an OAuth-style bearer token
+// from the client) rather than needing one injected by the rotator.
+func hasCallerCredential(r *http.Request) bool {
+	return r.Header.Get("X-Api-Key") != "" || strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")
+}
+
 // newReverseProxy builds the httputil.ReverseProxy that forwards to the real
 // Anthropic API (or whatever `upstream` points at), injecting either the
 // rotator's OAuth token or a caller-supplied API key.
+//
+// While the proxy is up, every account decision must stay inside the proxy:
+// if the pool has no usable account and the caller didn't bring their own
+// credential, the caller (server.go, before invoking this handler) refuses
+// the request outright rather than this Director silently falling back to
+// the *proxy process's own* ANTHROPIC_API_KEY env var — that key belongs to
+// whatever machine is hosting the proxy, not to the caller, and forwarding
+// on it would spend someone's real API credits behind their back. Falling
+// through to the real Anthropic API is only correct once the proxy itself
+// is down (see pkg/hook.SyncLaunchctlEnv / pkg/env.PrintEnvExports), never
+// while it's up and simply out of working pool accounts — hence no
+// os.Getenv("ANTHROPIC_API_KEY") read anywhere in this Director.
 func newReverseProxy(upstream string, rot *Rotator) (*httputil.ReverseProxy, error) {
 	target, err := url.Parse(upstream)
 	if err != nil {
@@ -146,18 +178,11 @@ func newReverseProxy(upstream string, rot *Rotator) (*httputil.ReverseProxy, err
 				if !strings.Contains(r.Header.Get("anthropic-beta"), "oauth") {
 					r.Header.Add("anthropic-beta", "oauth-2025-04-20")
 				}
-			} else {
-				apiKey := r.Header.Get("X-Api-Key")
-				if apiKey == "" {
-					if envKey := os.Getenv("ANTHROPIC_API_KEY"); envKey != "" {
-						apiKey = envKey
-						r.Header.Set("X-Api-Key", apiKey)
-					}
-				}
-				if r.Header.Get("X-Api-Key") != "" {
-					r.Header.Del("Authorization")
-				}
 			}
+			// else: no rotator token. If the caller brought their own
+			// credential (hasCallerCredential), it passes through
+			// unchanged — that's their key, not ours to touch. If not,
+			// server.go already refused the request before reaching here.
 			// Scrub body before it leaves the machine toward Anthropic/upstream.
 			scrubOutboundBody(r)
 		},
@@ -178,7 +203,7 @@ func newReverseProxy(upstream string, rot *Rotator) (*httputil.ReverseProxy, err
 //
 // chatPool serves /v1/chat/completions; toolPool serves Claude/Codex
 // /v1/messages failover. Callers may pass the same router for both.
-func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPool *router.AccountPoolRouter, rp http.Handler, upstream string, sw *swappableHandler, shutdown func()) http.Handler {
+func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPool *router.AccountPoolRouter, rp http.Handler, upstream string, sw *swappableHandler, authToken string, shutdown func()) http.Handler {
 	if toolPool == nil {
 		toolPool = chatPool
 	}
@@ -286,6 +311,9 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 		go func() {
 			if life.Sessions() > 0 {
 				if ph, err := newPassthroughHandler(rot, life, upstream, false, nil); err == nil {
+					if authToken != "" {
+						ph = requireAuth(authToken, ph)
+					}
 					sw.Set(ph)
 				} else {
 					log.Printf("amux proxy: grace-drain passthrough unavailable: %v", err)
@@ -341,9 +369,15 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 			}
 
 			hasTools := anthropicRequestHasTools(body)
-			hasAPIKey := r.Header.Get("X-Api-Key") != "" ||
-				strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") ||
-				os.Getenv("ANTHROPIC_API_KEY") != ""
+			// Caller-supplied credential only — deliberately excludes this
+			// *proxy process's* own ANTHROPIC_API_KEY env var. While the
+			// proxy is up, routing must stay inside the pool/rotator; a key
+			// sitting in the proxy host's environment is not the caller's
+			// to spend, and reading it here would let a fully-dead pool
+			// silently escape to the real Anthropic API instead of failing
+			// loud (see newReverseProxy's doc comment for the same rule
+			// applied to the Director).
+			hasAPIKey := hasCallerCredential(r)
 
 			claudeUsable := !rot.ShouldFailoverToProviderPool() &&
 				(rot.Token() != "" || rot.ProfileCount() > 0)
@@ -402,6 +436,20 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 						log.Printf("amux: auto-switched active provider → %s (status updated)", id)
 					}
 				}
+				return
+			}
+
+			// Nothing usable: no rotator token, no caller-supplied
+			// credential, no provider pool to fail over to. Refuse here
+			// rather than forwarding — while the proxy is up, account
+			// selection must stay inside it, never silently escape to the
+			// real Anthropic API on the proxy host's own credentials (or
+			// with no credential at all). Only a genuinely stopped proxy
+			// (`am proxy down`) should let clients reach Anthropic directly.
+			if rot.Token() == "" && !hasAPIKey {
+				http.Error(w, "amux proxy: no usable account in pool (all Claude accounts off/expired/rate-limited, "+
+					"no provider pool configured) — fix the pool with `am ls` / `am add`, or stop the proxy to fall "+
+					"back to the real Anthropic API (`am proxy down`)", http.StatusServiceUnavailable)
 				return
 			}
 
