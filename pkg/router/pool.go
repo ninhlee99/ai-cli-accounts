@@ -9,9 +9,24 @@ import (
 	"sync"
 	"time"
 
+	"amux-accounts/pkg/privacy"
 	"amux-accounts/pkg/term"
 	"amux-accounts/pkg/types"
 )
+
+// scrubBeforeSend is the universal outbound gate: every adapter path
+// (proxy bridge, am chat, tests) must pass here before network I/O.
+func scrubBeforeSend(req *types.ChatRequest) {
+	res := privacy.ScrubChatRequest(req)
+	if res.Len() == 0 {
+		return
+	}
+	dialect := "pool"
+	if req != nil && req.ClientDialect != "" {
+		dialect = req.ClientDialect
+	}
+	privacy.LogHits(nil, res, dialect)
+}
 
 // rateLimitCooldown is how long an adapter sits out after answering with a
 // rate limit, before Send tries it again. Keep short: Claude/ChatGPT web
@@ -24,8 +39,12 @@ const rateLimitCooldown = 2 * time.Minute
 // `am sw <provider>` is tried first; rate-limit failover promotes the
 // winner to preferred so status stays in sync. Non-rate-limit failures
 // on a pin do not silently jump to another provider.
+//
+// directory holds every addressable adapter (including out-of-pool) for
+// explicit X-Provider routing via SendNamed.
 type AccountPoolRouter struct {
 	adapters    []types.ProviderAdapter
+	directory   map[string]types.ProviderAdapter
 	preferred   string
 	lastUsed    string
 	mu          sync.RWMutex
@@ -38,7 +57,49 @@ func NewAccountPoolRouter(adapters []types.ProviderAdapter) *AccountPoolRouter {
 	sorted := make([]types.ProviderAdapter, len(adapters))
 	copy(sorted, adapters)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Priority() < sorted[j].Priority() })
-	return &AccountPoolRouter{adapters: sorted, cooldownMap: make(map[string]time.Time)}
+	dir := make(map[string]types.ProviderAdapter, len(sorted))
+	for _, a := range sorted {
+		dir[a.ID()] = a
+	}
+	return &AccountPoolRouter{adapters: sorted, directory: dir, cooldownMap: make(map[string]time.Time)}
+}
+
+// SetDirectory replaces the explicit-routing map (may include adapters not
+// in the rotate pool). Rotate order is unchanged.
+func (r *AccountPoolRouter) SetDirectory(adapters []types.ProviderAdapter) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	dir := make(map[string]types.ProviderAdapter, len(adapters))
+	for _, a := range adapters {
+		dir[a.ID()] = a
+	}
+	// Keep rotate adapters addressable too.
+	for _, a := range r.adapters {
+		dir[a.ID()] = a
+	}
+	r.directory = dir
+}
+
+// SendNamed routes to one adapter by ID (rotate pool or out-of-pool directory).
+func (r *AccountPoolRouter) SendNamed(ctx context.Context, id string, req *types.ChatRequest) (<-chan types.StreamChunk, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	scrubBeforeSend(req)
+	r.mu.RLock()
+	a := r.directory[id]
+	r.mu.RUnlock()
+	if a == nil {
+		return nil, fmt.Errorf("provider %q not addressable (see: am accounts)", id)
+	}
+	ch, err := a.SendMessageStream(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	r.lastUsed = id
+	r.mu.Unlock()
+	return ch, nil
 }
 
 // SetPreferred sets the active/pinned adapter shown in status and tried
@@ -101,6 +162,7 @@ func (r *AccountPoolRouter) Send(ctx context.Context, req *types.ChatRequest) (<
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	scrubBeforeSend(req)
 
 	r.mu.RLock()
 	preferredID := r.preferred
@@ -214,6 +276,7 @@ func (r *AccountPoolRouter) Status() []map[string]any {
 			"cooling":   cooling,
 			"preferred": a.ID() == r.preferred,
 			"last_used": a.ID() == r.lastUsed,
+			"in_pool":   true,
 		}
 		if cooling {
 			m["cooldown_until"] = cd.Format(time.RFC3339)
@@ -223,7 +286,8 @@ func (r *AccountPoolRouter) Status() []map[string]any {
 	return res
 }
 
-// Reload updates the router's adapters list and keeps existing cooldowns.
+// Reload updates the router's rotate-pool adapters and merges them into the
+// addressable directory (keeps existing out-of-pool entries).
 func (r *AccountPoolRouter) Reload(adapters []types.ProviderAdapter) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -231,4 +295,10 @@ func (r *AccountPoolRouter) Reload(adapters []types.ProviderAdapter) {
 	copy(sorted, adapters)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Priority() < sorted[j].Priority() })
 	r.adapters = sorted
+	if r.directory == nil {
+		r.directory = make(map[string]types.ProviderAdapter)
+	}
+	for _, a := range sorted {
+		r.directory[a.ID()] = a
+	}
 }

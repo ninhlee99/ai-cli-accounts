@@ -10,8 +10,8 @@ func TestNamedPoolID(t *testing.T) {
 	if got := NamedPoolID("claude_web", "ninhle@x.com"); got != "claude:web:ninhle" {
 		t.Fatalf("got %q", got)
 	}
-	if got := NamedPoolID("chatgpt_web", "tungnt@y.com"); got != "chatgpt:web:tungnt" {
-		t.Fatalf("got %q", got)
+	if got := NamedPoolID("chatgpt_web", "tungnt@y.com"); got != "chatgpt:tungnt" {
+		t.Fatalf("got %q want chatgpt:tungnt", got)
 	}
 	if got := NamedPoolID("openai_compatible", "a@b.com"); got != "" {
 		t.Fatalf("expected empty for custom type, got %q", got)

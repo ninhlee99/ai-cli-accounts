@@ -51,14 +51,14 @@ func WriteActivePointer(tool, name string) {
 // back to "<tool>cli" so a future tool never ends up with a blank/panicking
 // prefix.
 var profileIDPrefix = map[string]string{
-	"claude":      "claudecli",
-	"codex":       "codexcli",
-	"gemini":      "geminiweb",
-	"antigravity": "geminicli",
+	"claude":      "claude:code",
+	"codex":       "codex",
+	"gemini":      "gemini:web",
+	"antigravity": "antigravity",
 }
 
 // IDPrefixForTool returns the unified-ID prefix for a Profile-system tool
-// (e.g. "claude" -> "claudecli"). Exported so callers like cli.toolAndName
+// (e.g. "claude" -> "claude:code"). Exported so callers like cli.toolAndName
 // can recognize a bare ID's tool without duplicating the prefix table.
 func IDPrefixForTool(tool string) string {
 	if p, ok := profileIDPrefix[tool]; ok {

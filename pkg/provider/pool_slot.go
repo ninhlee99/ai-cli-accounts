@@ -8,18 +8,21 @@ import (
 )
 
 // poolBrandMethod maps a ProviderConfig.Type to the brand + method segments
-// used in identity IDs ("claude:web:ninhle").
+// used in identity IDs ("claude:web:ninhle"). ChatGPT uses brand-only
+// ("chatgpt:ninhle") via NamedPoolID special-case.
 var poolBrandMethod = map[string][2]string{
-	"claude_web":  {"claude", "web"},
-	"chatgpt_web": {"chatgpt", "web"},
-	"gemini_web":  {"gemini", "web"},
-	"gemini":      {"gemini", "api"},
+	"claude_web": {"claude", "web"},
+	"gemini_web": {"gemini", "web"},
+	"gemini":     {"gemini", "api"},
 }
 
 // NamedPoolID returns the short identity ID for a provider type + email
-// (e.g. claude_web + ninhle@x.com → "claude:web:ninhle"), or "" if the type
-// has no brand/method mapping or the email has no local part.
+// (e.g. claude_web + ninhle@x.com → "claude:web:ninhle"; chatgpt_web →
+// "chatgpt:ninhle"), or "" if the type has no mapping / email unusable.
 func NamedPoolID(providerType, email string) string {
+	if providerType == "chatgpt_web" {
+		return types.AccountBrandID("chatgpt", email)
+	}
 	bm, ok := poolBrandMethod[providerType]
 	if !ok {
 		return ""
@@ -30,6 +33,9 @@ func NamedPoolID(providerType, email string) string {
 // NamedPoolIDWithDomain returns the disambiguated identity ID when two emails
 // share a local part: claude_web + ninhle@gmail.com → "claude:web:ninhle-gmailcom".
 func NamedPoolIDWithDomain(providerType, email string) string {
+	if providerType == "chatgpt_web" {
+		return types.AccountBrandIDWithDomain("chatgpt", email)
+	}
 	bm, ok := poolBrandMethod[providerType]
 	if !ok {
 		return ""
@@ -227,6 +233,9 @@ func UpsertPoolProvider(path string, p ProviderConfig, renameFrom string) error 
 	}
 	if f == nil {
 		f = &AccountsFile{}
+	}
+	if dup := findDuplicateCredentialID(f, p, p.ID, renameFrom); dup != "" {
+		return &DuplicateAPIKeyError{ExistingID: dup}
 	}
 	for i, existing := range f.Providers {
 		if existing.ID == renameFrom {

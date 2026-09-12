@@ -535,6 +535,15 @@ func (r *Rotator) Rotate(from, reason string) {
 // Rotate, this clears any cooldown/dead-refresh blacklist on the target,
 // since a human explicitly picking that account is vouching for it.
 func (r *Rotator) ForceSwitch(name string) error {
+	return r.forceSwitch(name, false)
+}
+
+// ForceSwitchExplicit selects a profile for API X-Provider even if am off.
+func (r *Rotator) ForceSwitchExplicit(name string) error {
+	return r.forceSwitch(name, true)
+}
+
+func (r *Rotator) forceSwitch(name string, allowDisabled bool) error {
 	r.snapshotActiveIfChanged()
 
 	r.mu.Lock()
@@ -555,7 +564,7 @@ func (r *Rotator) ForceSwitch(name string) error {
 		r.mu.Unlock()
 		return fmt.Errorf("no profile %q (have: %s)", name, strings.Join(order, ", "))
 	}
-	if r.disabled[name] {
+	if r.disabled[name] && !allowDisabled {
 		r.mu.Unlock()
 		return fmt.Errorf("profile %q is off — run: am on %s", name, name)
 	}

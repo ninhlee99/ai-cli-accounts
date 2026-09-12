@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>amux · IDE tool inventory</title>
+<style>
+:root{
+  --bg:#0f1115; --panel:#171a21; --text:#e8eaed; --muted:#9aa0a6;
+  --line:#2a2f3a; --accent:#7dd3fc; --ok:#86efac; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  --sans:ui-sans-serif,system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 var(--sans)}
+.wrap{max-width:1100px;margin:0 auto;padding:28px 18px 72px}
+h1{font-size:26px;letter-spacing:-.02em;margin:6px 0 8px}
+.sub,.meta{color:var(--muted);font-size:13px}
+nav{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 28px}
+nav a{color:var(--accent);text-decoration:none;border:1px solid var(--line);padding:6px 10px;border-radius:8px;font:12px var(--mono)}
+nav a:hover{border-color:#556}
+section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:16px 0}
+section h2{margin:0 0 4px;font-size:18px}
+.ver{font:12px var(--mono);color:var(--muted);margin-bottom:12px}
+table{width:100%;border-collapse:collapse;font:12.5px/1.4 var(--mono)}
+th,td{text-align:left;padding:7px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:500;position:sticky;top:0;background:var(--panel)}
+td:first-child{color:#fde68a;white-space:nowrap}
+.tag{display:inline-block;padding:1px 7px;border-radius:999px;background:#1f2937;color:#cbd5e1;font-size:11px}
+.grid{overflow:auto;max-height:520px;border:1px solid var(--line);border-radius:8px}
+footer{margin-top:24px;color:var(--muted);font-size:12px}
+a{color:var(--accent)}
+.count{color:var(--ok);font:12px var(--mono)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="meta">amux · docs/reports</p>
+  <h1>IDE / CLI built-in tool inventory</h1>
+  <p class="sub">Scan 2026-09-11 · docs + local binaries · MCP/dynamic tools ghi riêng</p>
+  <nav>
+    <a href="#claude">Claude Code</a>
+    <a href="#cursor">Cursor</a>
+    <a href="#codex">Codex</a>
+    <a href="#antigravity">Antigravity</a>
+    <a href="#gemini">Gemini CLI</a>
+    <a href="#map">Cross-map</a>
+    <a href="inventory.md">Markdown</a>
+    <a href="index.html">Reports index</a>
+  </nav>
+
+  <section id="meta">
+    <h2>Scan matrix</h2>
+    <div class="grid" style="max-height:none">
+    <table>
+      <thead><tr><th>Product</th><th>Version</th><th>Source</th></tr></thead>
+      <tbody>
+        <tr><td>Claude Code</td><td>2.1.268</td><td>official tools docs + binary strings</td></tr>
+        <tr><td>Cursor</td><td>CLI 2026.06.24… · App 3.17.19</td><td>cursor-agent + cursor-agent-exec</td></tr>
+        <tr><td>Codex</td><td>openai/codex main (local cask broken)</td><td>handlers/spec_plan + KB v0.136</td></tr>
+        <tr><td>Antigravity</td><td>App 2.2.1 · agy 1.1.10</td><td>CORTEX_STEP_TYPE_* in agy/language_server</td></tr>
+        <tr><td>Gemini CLI</td><td>0.49.0</td><td>docs/reference/tools.md</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  <section id="claude">
+    <h2>Claude Code <span class="count">45 tools</span></h2>
+    <p class="ver">docs: code.claude.com/docs/en/tools · binary confirm 45/45</p>
+    <div class="grid">
+    <table>
+      <thead><tr><th>Tool</th><th>Category</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Agent</td><td><span class="tag">orchestration</span></td><td>Subagent / teammate</td></tr>
+        <tr><td>Artifact</td><td><span class="tag">publish</span></td><td>claude.ai artifact</td></tr>
+        <tr><td>AskUserQuestion</td><td><span class="tag">interaction</span></td><td></td></tr>
+        <tr><td>Bash</td><td><span class="tag">execute</span></td><td>permission gated</td></tr>
+        <tr><td>CronCreate</td><td><span class="tag">schedule</span></td><td></td></tr>
+        <tr><td>CronDelete</td><td><span class="tag">schedule</span></td><td></td></tr>
+        <tr><td>CronList</td><td><span class="tag">schedule</span></td><td></td></tr>
+        <tr><td>Edit</td><td><span class="tag">edit</span></td><td></td></tr>
+        <tr><td>EndConversation</td><td><span class="tag">session</span></td><td>≥2.1.213</td></tr>
+        <tr><td>EnterPlanMode</td><td><span class="tag">plan</span></td><td></td></tr>
+        <tr><td>EnterWorktree</td><td><span class="tag">git</span></td><td></td></tr>
+        <tr><td>ExitPlanMode</td><td><span class="tag">plan</span></td><td></td></tr>
+        <tr><td>ExitWorktree</td><td><span class="tag">git</span></td><td></td></tr>
+        <tr><td>Glob</td><td><span class="tag">search</span></td><td></td></tr>
+        <tr><td>Grep</td><td><span class="tag">search</span></td><td></td></tr>
+        <tr><td>ListAgents</td><td><span class="tag">orchestration</span></td><td>≥2.1.224</td></tr>
+        <tr><td>ListMcpResourcesTool</td><td><span class="tag">mcp</span></td><td></td></tr>
+        <tr><td>LSP</td><td><span class="tag">codeintel</span></td><td></td></tr>
+        <tr><td>Monitor</td><td><span class="tag">execute</span></td><td>bg / websocket</td></tr>
+        <tr><td>NotebookEdit</td><td><span class="tag">edit</span></td><td></td></tr>
+        <tr><td>PowerShell</td><td><span class="tag">execute</span></td><td></td></tr>
+        <tr><td>PushNotification</td><td><span class="tag">notify</span></td><td></td></tr>
+        <tr><td>Read</td><td><span class="tag">read</span></td><td></td></tr>
+        <tr><td>ReadMcpResourceTool</td><td><span class="tag">mcp</span></td><td></td></tr>
+        <tr><td>RemoteTrigger</td><td><span class="tag">schedule</span></td><td>Routines</td></tr>
+        <tr><td>ReportFindings</td><td><span class="tag">review</span></td><td></td></tr>
+        <tr><td>ScheduleWakeup</td><td><span class="tag">schedule</span></td><td>/loop</td></tr>
+        <tr><td>SendFeedback</td><td><span class="tag">product</span></td><td>≥2.1.238</td></tr>
+        <tr><td>SendMessage</td><td><span class="tag">orchestration</span></td><td></td></tr>
+        <tr><td>SendUserFile</td><td><span class="tag">deliver</span></td><td></td></tr>
+        <tr><td>ShareOnboardingGuide</td><td><span class="tag">team</span></td><td></td></tr>
+        <tr><td>Skill</td><td><span class="tag">skills</span></td><td></td></tr>
+        <tr><td>TaskCreate</td><td><span class="tag">tasks</span></td><td></td></tr>
+        <tr><td>TaskGet</td><td><span class="tag">tasks</span></td><td></td></tr>
+        <tr><td>TaskList</td><td><span class="tag">tasks</span></td><td></td></tr>
+        <tr><td>TaskOutput</td><td><span class="tag">tasks</span></td><td>deprecated</td></tr>
+        <tr><td>TaskStop</td><td><span class="tag">tasks</span></td><td></td></tr>
+        <tr><td>TaskUpdate</td><td><span class="tag">tasks</span></td><td></td></tr>
+        <tr><td>TodoWrite</td><td><span class="tag">tasks</span></td><td>often disabled</td></tr>
+        <tr><td>ToolSearch</td><td><span class="tag">meta</span></td><td></td></tr>
+        <tr><td>WaitForMcpServers</td><td><span class="tag">mcp</span></td><td></td></tr>
+        <tr><td>WebFetch</td><td><span class="tag">web</span></td><td></td></tr>
+        <tr><td>WebSearch</td><td><span class="tag">web</span></td><td></td></tr>
+        <tr><td>Workflow</td><td><span class="tag">orchestration</span></td><td></td></tr>
+        <tr><td>Write</td><td><span class="tag">edit</span></td><td></td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p class="sub">Dynamic: <code>mcp__&lt;server&gt;__&lt;tool&gt;</code></p>
+  </section>
+
+  <section id="cursor">
+    <h2>Cursor Agent</h2>
+    <p class="ver">permissions + cursor-agent-exec dist/main.js</p>
+    <div class="grid">
+    <table>
+      <thead><tr><th>Tool</th><th>Category</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Shell</td><td><span class="tag">execute</span></td><td>Shell(cmd) permission</td></tr>
+        <tr><td>Read</td><td><span class="tag">read</span></td><td>Read(path)</td></tr>
+        <tr><td>Write</td><td><span class="tag">edit</span></td><td>Write(path)</td></tr>
+        <tr><td>Delete</td><td><span class="tag">edit</span></td><td></td></tr>
+        <tr><td>StrReplace</td><td><span class="tag">edit</span></td><td></td></tr>
+        <tr><td>ApplyPatch</td><td><span class="tag">edit</span></td><td></td></tr>
+        <tr><td>Grep</td><td><span class="tag">search</span></td><td>not fully covered by Read deny</td></tr>
+        <tr><td>Glob</td><td><span class="tag">search</span></td><td></td></tr>
+        <tr><td>SemanticSearch</td><td><span class="tag">search</span></td><td></td></tr>
+        <tr><td>CodeLineage</td><td><span class="tag">search</span></td><td></td></tr>
+        <tr><td>WebFetch</td><td><span class="tag">web</span></td><td>WebFetch(domain)</td></tr>
+        <tr><td>WebSearch</td><td><span class="tag">web</span></td><td></td></tr>
+        <tr><td>AskQuestion</td><td><span class="tag">interaction</span></td><td></td></tr>
+        <tr><td>GenerateImage</td><td><span class="tag">media</span></td><td></td></tr>
+        <tr><td>SwitchMode</td><td><span class="tag">plan</span></td><td></td></tr>
+        <tr><td>CreatePlan</td><td><span class="tag">plan</span></td><td></td></tr>
+        <tr><td>Task</td><td><span class="tag">orchestration</span></td><td></td></tr>
+        <tr><td>TodoWrite</td><td><span class="tag">tasks</span></td><td></td></tr>
+        <tr><td>Await / AwaitShell</td><td><span class="tag">sync</span></td><td></td></tr>
+        <tr><td>EditNotebook</td><td><span class="tag">edit</span></td><td></td></tr>
+        <tr><td>ReadLints</td><td><span class="tag">codeintel</span></td><td></td></tr>
+        <tr><td>ListMcpResources</td><td><span class="tag">mcp</span></td><td></td></tr>
+        <tr><td>FetchMcpResource</td><td><span class="tag">mcp</span></td><td></td></tr>
+        <tr><td>CallMcpTool</td><td><span class="tag">mcp</span></td><td>Mcp(server:tool)</td></tr>
+        <tr><td>ComputerUse</td><td><span class="tag">os</span></td><td>gated</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  <section id="codex">
+    <h2>Codex CLI</h2>
+    <p class="ver">openai/codex main handlers · local brew binary missing</p>
+    <div class="grid">
+    <table>
+      <thead><tr><th>Tool</th><th>Category</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>shell_command</td><td><span class="tag">execute</span></td><td>primary</td></tr>
+        <tr><td>shell / local_shell / container.exec</td><td><span class="tag">execute</span></td><td>aliases</td></tr>
+        <tr><td>exec_command</td><td><span class="tag">execute</span></td><td>unified PTY</td></tr>
+        <tr><td>write_stdin</td><td><span class="tag">execute</span></td><td></td></tr>
+        <tr><td>apply_patch</td><td><span class="tag">edit</span></td><td>V4A</td></tr>
+        <tr><td>update_plan</td><td><span class="tag">plan</span></td><td></td></tr>
+        <tr><td>view_image</td><td><span class="tag">media</span></td><td></td></tr>
+        <tr><td>image_gen / imagegen</td><td><span class="tag">media</span></td><td>namespaced</td></tr>
+        <tr><td>web_search / web.run</td><td><span class="tag">web</span></td><td></td></tr>
+        <tr><td>tool_search</td><td><span class="tag">meta</span></td><td></td></tr>
+        <tr><td>list_mcp_resources</td><td><span class="tag">mcp</span></td><td></td></tr>
+        <tr><td>list_mcp_resource_templates</td><td><span class="tag">mcp</span></td><td></td></tr>
+        <tr><td>read_mcp_resource</td><td><span class="tag">mcp</span></td><td></td></tr>
+        <tr><td>request_user_input</td><td><span class="tag">interaction</span></td><td>+ async</td></tr>
+        <tr><td>request_permissions</td><td><span class="tag">policy</span></td><td></td></tr>
+        <tr><td>send_message_to_user_async</td><td><span class="tag">interaction</span></td><td></td></tr>
+        <tr><td>get_context_remaining</td><td><span class="tag">meta</span></td><td></td></tr>
+        <tr><td>new_context</td><td><span class="tag">meta</span></td><td></td></tr>
+        <tr><td>wait_for_environment</td><td><span class="tag">env</span></td><td></td></tr>
+        <tr><td>list_available_plugins_to_install</td><td><span class="tag">plugins</span></td><td></td></tr>
+        <tr><td>request_plugin_install</td><td><span class="tag">plugins</span></td><td></td></tr>
+        <tr><td>clock.sleep / clock.curr_time</td><td><span class="tag">util</span></td><td></td></tr>
+        <tr><td>spawn_agent</td><td><span class="tag">multi-agent</span></td><td></td></tr>
+        <tr><td>send_input</td><td><span class="tag">multi-agent</span></td><td></td></tr>
+        <tr><td>wait_agent</td><td><span class="tag">multi-agent</span></td><td></td></tr>
+        <tr><td>close_agent</td><td><span class="tag">multi-agent</span></td><td></td></tr>
+        <tr><td>resume_agent</td><td><span class="tag">multi-agent</span></td><td></td></tr>
+        <tr><td>send_message / followup_task / interrupt_agent / list_agents</td><td><span class="tag">multi-agent</span></td><td>v2</td></tr>
+        <tr><td>read_file / list_dir / glob_file_search / rg / git</td><td><span class="tag">fs†</span></td><td>KB v0.136; may be shell-prefer now</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  <section id="antigravity">
+    <h2>Antigravity</h2>
+    <p class="ver">agy 1.1.10 · tool name = lowercase CORTEX_STEP_TYPE_*</p>
+    <h3 style="font-size:14px;color:var(--muted);margin:12px 0 8px">Core / high-confidence</h3>
+    <div class="grid" style="max-height:360px">
+    <table>
+      <thead><tr><th>Tool</th><th>Category</th></tr></thead>
+      <tbody>
+        <tr><td>run_command</td><td><span class="tag">execute</span></td></tr>
+        <tr><td>view_file / view_file_outline / view_code_item</td><td><span class="tag">read</span></td></tr>
+        <tr><td>write_to_file / edit_file / multi_replace</td><td><span class="tag">edit</span></td></tr>
+        <tr><td>list_directory / find / grep_search / code_search</td><td><span class="tag">search</span></td></tr>
+        <tr><td>search_web / read_url_content</td><td><span class="tag">web</span></td></tr>
+        <tr><td>notify_user / ask_question</td><td><span class="tag">interaction</span></td></tr>
+        <tr><td>task_boundary / command_status</td><td><span class="tag">tasks</span></td></tr>
+        <tr><td>browser_subagent + browser_*</td><td><span class="tag">browser</span></td></tr>
+        <tr><td>mcp_tool / list_resources / read_resource</td><td><span class="tag">mcp</span></td></tr>
+        <tr><td>tool_search / invoke_subagent</td><td><span class="tag">meta</span></td></tr>
+        <tr><td>generate_image / edit_notebook / git_commit / wait</td><td><span class="tag">other</span></td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p class="sub">Full step catalog (~110): xem <a href="inventory.md">inventory.md</a>. Cloud API agent khác: <code>code_execution</code>, <code>google_search</code>, <code>url_context</code>.</p>
+  </section>
+
+  <section id="gemini">
+    <h2>Gemini CLI <span class="count">~20+ tools</span></h2>
+    <p class="ver">docs/reference/tools.md · package 0.49.0</p>
+    <div class="grid">
+    <table>
+      <thead><tr><th>Tool</th><th>Kind</th><th>Category</th></tr></thead>
+      <tbody>
+        <tr><td>run_shell_command</td><td>Execute</td><td>shell</td></tr>
+        <tr><td>glob</td><td>Search</td><td>fs</td></tr>
+        <tr><td>grep_search</td><td>Search</td><td>fs</td></tr>
+        <tr><td>list_directory</td><td>Read</td><td>fs</td></tr>
+        <tr><td>read_file</td><td>Read</td><td>fs</td></tr>
+        <tr><td>read_many_files</td><td>Read</td><td>fs</td></tr>
+        <tr><td>replace</td><td>Edit</td><td>fs</td></tr>
+        <tr><td>write_file</td><td>Edit</td><td>fs</td></tr>
+        <tr><td>ask_user</td><td>Communicate</td><td>interaction</td></tr>
+        <tr><td>write_todos</td><td>Other</td><td>tasks</td></tr>
+        <tr><td>tracker_*</td><td>Think</td><td>experimental</td></tr>
+        <tr><td>update_topic</td><td>Think</td><td>status</td></tr>
+        <tr><td>list_mcp_resources</td><td>Search</td><td>mcp</td></tr>
+        <tr><td>read_mcp_resource</td><td>Read</td><td>mcp</td></tr>
+        <tr><td>activate_skill</td><td>Other</td><td>skills</td></tr>
+        <tr><td>get_internal_docs</td><td>Think</td><td>docs</td></tr>
+        <tr><td>enter_plan_mode / exit_plan_mode</td><td>Plan</td><td>plan</td></tr>
+        <tr><td>complete_task</td><td>Other</td><td>subagent</td></tr>
+        <tr><td>google_web_search</td><td>Search</td><td>web</td></tr>
+        <tr><td>web_fetch</td><td>Fetch</td><td>web</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  <section id="map">
+    <h2>Cross-IDE core map</h2>
+    <div class="grid" style="max-height:none">
+    <table>
+      <thead><tr><th>Capability</th><th>Claude</th><th>Cursor</th><th>Codex</th><th>Antigravity</th><th>Gemini</th></tr></thead>
+      <tbody>
+        <tr><td>Shell</td><td>Bash</td><td>Shell</td><td>shell_command</td><td>run_command</td><td>run_shell_command</td></tr>
+        <tr><td>Read</td><td>Read</td><td>Read</td><td>shell / read_file†</td><td>view_file</td><td>read_file</td></tr>
+        <tr><td>Write</td><td>Write</td><td>Write</td><td>apply_patch</td><td>write_to_file</td><td>write_file</td></tr>
+        <tr><td>Edit</td><td>Edit</td><td>StrReplace/ApplyPatch</td><td>apply_patch</td><td>edit_file</td><td>replace</td></tr>
+        <tr><td>Grep</td><td>Grep</td><td>Grep</td><td>rg†</td><td>grep_search</td><td>grep_search</td></tr>
+        <tr><td>Web search</td><td>WebSearch</td><td>WebSearch</td><td>web_search</td><td>search_web</td><td>google_web_search</td></tr>
+        <tr><td>MCP call</td><td>mcp__*</td><td>CallMcpTool</td><td>mcp__*</td><td>mcp_tool</td><td>MCP resources</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  <footer>
+    Full notes + CORTEX catalog: <a href="inventory.md">inventory.md</a>.
+    Wire-format smoke reports: Claude / Cursor / Codex / Antigravity HTML trong cùng folder.
+  </footer>
+</div>
+</body>
+</html>

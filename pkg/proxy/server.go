@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"amux-accounts/pkg/bridge"
+	"amux-accounts/pkg/privacy"
 	"amux-accounts/pkg/profile"
 	"amux-accounts/pkg/provider"
 	"amux-accounts/pkg/router"
@@ -95,6 +96,9 @@ func RunProxy(addr, upstream string) error {
 
 	adapters, _ := provider.LoadAccounts(provider.DefaultAccountsPath())
 	pool := router.NewAccountPoolRouter(adapters)
+	if all, err := provider.LoadAllAddressable(provider.DefaultAccountsPath()); err == nil {
+		pool.SetDirectory(all)
+	}
 
 	rp, err := newReverseProxy(upstream, rot)
 	if err != nil {
@@ -152,6 +156,8 @@ func newReverseProxy(upstream string, rot *Rotator) (*httputil.ReverseProxy, err
 					r.Header.Del("Authorization")
 				}
 			}
+			// Scrub body before it leaves the machine toward Anthropic/upstream.
+			scrubOutboundBody(r)
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			rot.Observe(resp)
@@ -264,6 +270,12 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 				toolPool.Reload(reloaded)
 			}
 		}
+		if all, err := provider.LoadAllAddressable(provider.DefaultAccountsPath()); err == nil {
+			chatPool.SetDirectory(all)
+			if toolPool != chatPool {
+				toolPool.SetDirectory(all)
+			}
+		}
 		fmt.Fprintf(w, "%d\n", len(rot.Names()))
 	})
 
@@ -313,7 +325,18 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 				http.Error(w, "read request body: "+err.Error(), http.StatusBadRequest)
 				return
 			}
+			if scrubbed, res := privacy.ScrubBytes(body); res.Len() > 0 {
+				body = scrubbed
+				privacy.LogHits(r, res, "claude")
+			}
 			r.Body = io.NopCloser(bytes.NewReader(body))
+			r.ContentLength = int64(len(body))
+			r.Header.Set("Content-Length", strconv.Itoa(len(body)))
+
+			xProvider := strings.TrimSpace(r.Header.Get("X-Provider"))
+			if xProvider == "" {
+				xProvider = strings.TrimSpace(r.Header.Get("x-provider"))
+			}
 
 			hasTools := anthropicRequestHasTools(body)
 			hasAPIKey := r.Header.Get("X-Api-Key") != "" ||
@@ -326,9 +349,22 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 			usePool := false
 			pool := toolPool
 			autoFromClaude := false
+
+			// Explicit X-Provider: pin that pool account (even out of rotate).
+			// Claude profile names still use ForceSwitch + reverse-proxy below.
+			if xProvider != "" {
+				if err := rot.ForceSwitchExplicit(xProvider); err == nil {
+					mode.Set("claude")
+					rp.ServeHTTP(w, r)
+					return
+				}
+				usePool = true
+			}
+
 			switch {
+			case usePool:
+				// already decided via X-Provider
 			case hasTools && claudeUsable:
-				// API-key style agent loop — native Anthropic tool_use.
 				if rot.ProfileCount() > 0 {
 					rot.EnsureUsableActive()
 				}
@@ -385,4 +421,26 @@ func anthropicRequestHasTools(body []byte) bool {
 		return false
 	}
 	return len(wrap.Tools) > 0
+}
+
+// scrubOutboundBody rewrites r.Body in place, replacing secrets with samples
+// before httputil.ReverseProxy dials the upstream. Safe to call repeatedly.
+func scrubOutboundBody(r *http.Request) {
+	if r == nil || r.Body == nil || r.Method == http.MethodGet || r.Method == http.MethodHead {
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
+	_ = r.Body.Close()
+	if err != nil {
+		r.Body = io.NopCloser(bytes.NewReader(nil))
+		r.ContentLength = 0
+		return
+	}
+	if scrubbed, res := privacy.ScrubBytes(body); res.Len() > 0 {
+		body = scrubbed
+		privacy.LogHits(r, res, "claude")
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	r.Header.Set("Content-Length", strconv.Itoa(len(body)))
 }

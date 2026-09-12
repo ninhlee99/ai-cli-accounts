@@ -143,6 +143,7 @@ func LoadRequests(limit int, filter string) []types.RequestEntry {
 		if filter != "" {
 			blob := strings.ToLower(strings.Join([]string{
 				e.Dialect, e.Account, e.Model, e.Path, e.Input, e.Output, e.Error, e.StopReason,
+				e.ToolStatus, strings.Join(e.Tools, " "),
 			}, " "))
 			if !strings.Contains(blob, filter) {
 				continue

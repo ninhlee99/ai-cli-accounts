@@ -12,6 +12,7 @@ import (
 	"amux-accounts/pkg/profile"
 	"amux-accounts/pkg/proxy"
 	"amux-accounts/pkg/term"
+	"amux-accounts/pkg/types"
 )
 
 // proxyStatus is the decoded /_am/status payload (shared by status + watch Dash).
@@ -233,7 +234,7 @@ func printPoolDetail(s *proxyStatus) {
 		term.Row(fmt.Sprintf("%s  %s  %s",
 			badge,
 			term.Dim(fmt.Sprintf("p%-2.0f", prio)),
-			term.Bold(id),
+			term.Bold(types.DisplayAccountID(id)),
 		))
 		if cooling {
 			if cdUntil, ok := p["cooldown_until"].(string); ok && cdUntil != "" {

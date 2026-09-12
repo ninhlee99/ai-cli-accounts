@@ -356,7 +356,7 @@ func loginGemini(f loginFlags) {
 		Cookies:  f.cookie,
 	})
 	if err != nil {
-		fmt.Printf("Error saving: %v\n", err)
+		fmt.Println(err.Error())
 		return
 	}
 	proxy.Sync()
@@ -747,8 +747,17 @@ func CmdAPI(args []string) {
 			return
 		}
 
+		id := name
+		// OpenRouter keys always get openrouter:api:NN so multi-key works.
+		nameL := strings.ToLower(strings.TrimSpace(name))
+		if provider.IsOpenRouterEndpoint(endpoint) || nameL == "openrouter" || nameL == "openrouter:api" || strings.HasPrefix(nameL, "openrouter:api:") {
+			if next, err := provider.NextIDForPrefix(provider.DefaultAccountsPath(), "openrouter:api"); err == nil {
+				id = next
+			}
+		}
+
 		err := provider.AddOrUpdateProvider(provider.DefaultAccountsPath(), provider.ProviderConfig{
-			ID:       name,
+			ID:       id,
 			Type:     "openai_compatible",
 			Priority: priority,
 			BaseURL:  endpoint,
@@ -760,6 +769,6 @@ func CmdAPI(args []string) {
 			return
 		}
 		proxy.Sync()
-		fmt.Printf("Added OpenAI-compatible provider %q to pool (priority %d)\n", name, priority)
+		fmt.Printf("Added OpenAI-compatible provider %q to pool (priority %d)\n", id, priority)
 	}
 }

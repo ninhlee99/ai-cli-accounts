@@ -69,10 +69,10 @@ func TestProfile_BundleRoundtrip(t *testing.T) {
 
 func TestProfile_IDPrefixForTool(t *testing.T) {
 	cases := map[string]string{
-		"claude":      "claudecli",
-		"codex":       "codexcli",
-		"gemini":      "geminiweb",
-		"antigravity": "geminicli",
+		"claude":      "claude:code",
+		"codex":       "codex",
+		"gemini":      "gemini:web",
+		"antigravity": "antigravity",
 		"sometool":    "sometoolcli", // unmapped tool falls back to "<tool>cli"
 	}
 	for tool, want := range cases {
@@ -117,7 +117,7 @@ func TestProfile_ListProfilesUnifiedIDs(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("expected 2 profiles, got %d: %+v", len(got), got)
 	}
-	want := []string{"codexcli:01", "codexcli:02"}
+	want := []string{"codex:01", "codex:02"}
 	for i, m := range got {
 		if m.ID != want[i] {
 			t.Errorf("profile %d (%s): ID = %q, want %q", i, m.Name, m.ID, want[i])

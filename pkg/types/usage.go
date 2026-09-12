@@ -34,4 +34,10 @@ type RequestEntry struct {
 	DurationMs int64     `json:"ms,omitempty"`
 	StopReason string    `json:"stop,omitempty"`
 	Error      string    `json:"error,omitempty"`
+	// Tools = model-requested tool names; ToolStatus "" | "ok" | "err".
+	Tools      []string `json:"tools,omitempty"`
+	ToolStatus string   `json:"tool_status,omitempty"`
+	// Redactions = privacy scrub kinds replaced before outbound send
+	// (e.g. "email", "api_key"). Never contains original secrets.
+	Redactions []string `json:"redactions,omitempty"`
 }

@@ -53,7 +53,7 @@ Account Profiles:
   amux on <id|name>           re-enable a Claude profile
   amux current [tool]         print the currently active account on system
   amux status                 proxy state, rate limits (5h/7d), provider pool
-  amux watch                  live TUI: Dash · Accounts · Logs · Usage · Requests
+  amux watch                  live TUI: Dash · Accounts · Activity · Usage
 
 Multi-Provider Gateway & Plugins:
   amux login [provider] [--browser] [--token T] [--cookie C] [--refresh R] [--model M]
@@ -63,7 +63,7 @@ Multi-Provider Gateway & Plugins:
   amux doctor providers     live 1-turn probe of every pool adapter (OK/FAIL)
   amux accounts               list multi-provider accounts in pool, sorted by priority
   amux accounts rm <id>       remove a pool account (same as: amux api rm)
-  amux accounts off|on <id>   disable/enable a pool account (skip failover)
+  amux accounts off|on <id>   remove/add from rotate pool (still callable via X-Provider)
   amux accounts priority <id> <N>
                             set a pool account's priority (lower = tried first); hot-reloads
                             a running proxy, no restart needed
@@ -78,7 +78,7 @@ Multi-Provider Gateway & Plugins:
                             pins the session to one pool account instead of the whole pool
 
   Note: once a codex profile is logged in (amux add codex), its ChatGPT-subscription
-  token is automatically reused as an extra pool adapter (codexcli:NN, type codex_cli) —
+  token is automatically reused as an extra pool adapter (codex:NN, type codex_cli) —
   no separate login needed. It calls an undocumented ChatGPT backend endpoint the same
   way this CLI's other *-web adapters do, so it may break if OpenAI changes that API.
 
@@ -114,6 +114,14 @@ func Run(rawArgs []string) {
 	// already-migrated IDs.
 	if err := provider.MigrateLegacyIDs(provider.DefaultAccountsPath()); err != nil {
 		fmt.Fprintf(os.Stderr, "amux: warning: could not migrate account IDs: %v\n", err)
+	} else {
+		// Reload in-memory pool if proxy already up (IDs may have changed).
+		proxy.Sync()
+	}
+	if removed, err := provider.DeduplicateProvidersByCredential(provider.DefaultAccountsPath()); err != nil {
+		fmt.Fprintf(os.Stderr, "amux: warning: could not dedupe credentials: %v\n", err)
+	} else if len(removed) > 0 {
+		fmt.Fprintf(os.Stderr, "amux: removed duplicate credential providers: %s\n", strings.Join(removed, ", "))
 	}
 
 	cmd := rawArgs[1]

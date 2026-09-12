@@ -199,24 +199,41 @@ Cursor/Codex gửi OpenAI `tools` → `pkg/tools` → pool → trả `tool_calls
 
 ## 📺 `amux watch` — Dashboard realtime
 
+TUI Bubble Tea + Lip Gloss (Tokyo Night, rounded panels) — layout theo prototype `amux-go`:
+
+Tabs: **Dash · Accounts (grouped) · Activity (logs+requests) · Usage**
+
+- Accounts nhóm: CLAUDE CODE / CLAUDE WEB / CODEX / CHATGPT / GEMINI… / API (OpenRouter, OpenAI, …)
+- Claude hiện **5h + 7d** khi proxy đã nhận rate-limit headers
+- `POOL` = trong rotate · `OUT` = chỉ gọi qua `X-Provider` (`am accounts off|on`)
+- Usage: `/` filter theo account/model · `p` project · `d/w/m/a` period
+
 Theo dõi gateway trên terminal theo mô hình **overview → detail**:
 
 | Tab | Vai trò | Nội dung |
 | :--- | :--- | :--- |
-| **1 Dash** | Overview | Proxy KPI, accounts/pool counts, token 7 ngày, activity + request gần nhất |
-| **2 Accounts** | Detail | Claude accounts (bar 5h/7d) + provider pool đầy đủ |
-| **3 Logs** | Detail | ROTATE / FAILOVER / AUTH / PROXY… (filter `/`) |
-| **4 Usage** | Detail | Token theo day/week/month/all · account · project |
-| **5 Requests** | Detail | Chat I/O preview, dialect, latency, stop reason |
+| **1 Dash** | Overview | Proxy KPI, pool in/out, token 7 ngày, activity + request |
+| **2 Accounts** | Detail | Nhóm CLAUDE CODE / WEB / CODEX / CHATGPT / GEMINI / API · 5h+7d · POOL/OUT |
+| **3 Activity** | Detail | Logs + Requests gộp · filter `/` |
+| **4 Usage** | Detail | Token day/week/month/all · filter account/model · project |
 
 ```sh
 am proxy up          # terminal khác
 am watch             # dashboard
 ```
 
-Phím: `1`–`5` / `Tab` đổi tab · `/` filter (tab detail) · `d/w/m/a` + `p` (Usage) · `c` clear · `↑↓` scroll · `r` refresh · `q` thoát.
+Phím: `1`–`4` / `Tab` · `/` filter · `d/w/m/a` + `p` (Usage) · `c` clear · `↑↓` · `r` · `q`.
 
-Log lưu tại `~/.am/events.log` và `~/.am/requests.log` (JSONL).
+**Rotate:** login mặc định vào pool. `am accounts off <id>` / `am off <claude>` = ra khỏi rotate. Vẫn gọi được:
+
+```http
+X-Provider: <account-id>
+X-Model: <model>
+```
+
+Không header → hành vi cũ. Restart proxy sau khi đổi pool: `am proxy down && am proxy up`.
+
+Log: `~/.am/events.log`, `~/.am/requests.log`.
 
 ---
 

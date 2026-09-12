@@ -60,6 +60,32 @@ func AccountNamedIDWithDomain(brand, method, email string) string {
 	return accountNamedID(brand, method, email, true)
 }
 
+// AccountBrandID builds brand:local (no method segment) — ChatGPT web:
+// "chatgpt", "ninhle@x.com" → "chatgpt:ninhle".
+func AccountBrandID(brand, email string) string {
+	return accountBrandID(brand, email, false)
+}
+
+// AccountBrandIDWithDomain → "chatgpt:ninhle-gmailcom".
+func AccountBrandIDWithDomain(brand, email string) string {
+	return accountBrandID(brand, email, true)
+}
+
+func accountBrandID(brand, email string, withDomain bool) string {
+	brand = strings.TrimSpace(strings.ToLower(brand))
+	local := EmailLocalPart(email)
+	if brand == "" || local == "" {
+		return ""
+	}
+	handle := local
+	if withDomain {
+		if domain := EmailDomainPart(email); domain != "" {
+			handle = local + "-" + domain
+		}
+	}
+	return fmt.Sprintf("%s:%s", brand, handle)
+}
+
 func accountNamedID(brand, method, email string, withDomain bool) string {
 	brand = strings.TrimSpace(strings.ToLower(brand))
 	method = strings.TrimSpace(strings.ToLower(method))

@@ -145,10 +145,11 @@ func runClaudeTurn(pool *router.AccountPoolRouter, history *[]types.ChatMessage,
 	*history = append(*history, types.ChatMessage{Role: "user", Content: prompt})
 
 	req := &types.ChatRequest{
-		Model:       "default",
-		Messages:    *history,
-		Stream:      true,
-		FullContext: true,
+		Model:         "default",
+		Messages:      *history,
+		Stream:        true,
+		FullContext:   true,
+		ClientDialect: "chat",
 	}
 
 	started := time.Now()

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"amux-accounts/pkg/privacy"
 	"amux-accounts/pkg/router"
 	"amux-accounts/pkg/tools"
 	"amux-accounts/pkg/types"
@@ -28,6 +29,10 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request, pool *router.
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
 	}
+	if scrubbed, res := privacy.ScrubBytes(body); res.Len() > 0 {
+		body = scrubbed
+		privacy.LogHits(r, res, "openai")
+	}
 
 	req, err := openAIBodyToChatRequest(body)
 	if err != nil {
@@ -37,9 +42,9 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request, pool *router.
 
 	ctx := r.Context()
 	started := time.Now()
-	stream, err := pool.Send(ctx, req)
+	stream, err := poolSend(r, pool, req)
 	if err != nil {
-		logChatRequest(r, pool, req, "", "", err.Error(), 0, 0, started)
+		logChatRequest(r, pool, req, "", "", err.Error(), 0, 0, started, nil)
 		http.Error(w, fmt.Sprintf("all providers failed: %v", err), http.StatusBadGateway)
 		return
 	}
@@ -169,7 +174,7 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request, pool *router.
 		flusher.Flush()
 		outTok := len(fullContent.String()) / 4
 		recordChatUsage(r, pool, req.Model, inputTokens, outTok)
-		logChatRequest(r, pool, req, fullContent.String(), finishReason, "", inputTokens, outTok, started)
+		logChatRequest(r, pool, req, fullContent.String(), finishReason, "", inputTokens, outTok, started, toolCalls)
 		return
 	}
 
@@ -228,7 +233,7 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request, pool *router.
 	}
 	_ = json.NewEncoder(w).Encode(resp)
 	recordChatUsage(r, pool, req.Model, inputTokens, completionTokens)
-	logChatRequest(r, pool, req, full.String(), finishReason, "", inputTokens, completionTokens, started)
+	logChatRequest(r, pool, req, full.String(), finishReason, "", inputTokens, completionTokens, started, toolCalls)
 }
 
 // openAIBodyToChatRequest parses a Cursor/Codex OpenAI chat.completions body

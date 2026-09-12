@@ -12,6 +12,16 @@ import (
 	"amux-accounts/pkg/types"
 )
 
+// DuplicateAPIKeyError means the same credential (API key / session token /
+// session key) is already bound to another provider — one secret → one entry.
+type DuplicateAPIKeyError struct {
+	ExistingID string
+}
+
+func (e *DuplicateAPIKeyError) Error() string {
+	return fmt.Sprintf("credential already used by provider %q — skipped", e.ExistingID)
+}
+
 type ProviderConfig struct {
 	ID       string `json:"id"`
 	Type     string `json:"type"` // "openai_compatible" | "chatgpt_web" | "claude_web" | "gemini"
@@ -48,11 +58,23 @@ type ProviderConfig struct {
 	MetadataJSON string `json:"metadataJson,omitempty"`
 }
 
-// IsConfigured reports whether the provider has valid credentials / configuration.
+// IsConfigured reports whether the provider has valid credentials and is in
+// the rotate pool (Enabled != false). Out-of-pool accounts still have
+// credentials via HasCredentials and can be addressed with X-Provider.
 func (p ProviderConfig) IsConfigured() bool {
-	if p.Enabled != nil && !*p.Enabled {
+	if !p.InRotatePool() {
 		return false
 	}
+	return p.HasCredentials()
+}
+
+// InRotatePool is true unless Enabled is explicitly false.
+func (p ProviderConfig) InRotatePool() bool {
+	return p.Enabled == nil || *p.Enabled
+}
+
+// HasCredentials reports whether secrets/config look usable (ignores Enabled).
+func (p ProviderConfig) HasCredentials() bool {
 	switch p.Type {
 	case "openai_compatible", "gemini":
 		return ResolveSecret(p.APIKey) != ""
@@ -62,6 +84,8 @@ func (p ProviderConfig) IsConfigured() bool {
 		return ResolveSecret(p.SessionKey) != ""
 	case "gemini_web":
 		return strings.TrimSpace(p.Cookies) != "" || ResolveSecret(p.SessionKey) != ""
+	case "codex_cli":
+		return CodexAuthAvailable()
 	}
 	return false
 }
@@ -80,45 +104,79 @@ func DefaultAccountsPath() string {
 // rewrite accounts.json in place; anything not in this map (custom `am api
 // add <name>` providers) is left untouched.
 var legacyIDPrefix = map[string]string{
-	"claude-web":       "claudeweb",
-	"chatgpt-web":      "chatgptweb",
-	"google-ai-studio": "geminiapi",
-	"github-models":    "githubapi",
-	"groq":             "groqapi",
+	"claude-web":       "claude:web",
+	"chatgpt-web":      "chatgpt",
+	"google-ai-studio": "gemini:api",
+	"github-models":    "github:api",
+	"groq":             "groq:api",
 }
 
 // poolIDPrefix maps a ProviderConfig.Type to its unified-ID prefix, for the
 // built-in provider types that always get one. Used by the loginXxx flows in
 // pkg/ui/login.go to compute the next free ID when adding a session.
 var poolIDPrefix = map[string]string{
-	"claude_web":  "claudeweb",
-	"chatgpt_web": "chatgptweb",
-	"gemini":      "geminiapi",
-	"gemini_web":  "geminiweb",
+	"claude_web":  "claude:web",
+	"chatgpt_web": "chatgpt",
+	"gemini":      "gemini:api",
+	"gemini_web":  "gemini:web",
 }
 
 // PoolIDPrefix returns the unified-ID prefix for a built-in pool provider
-// type (e.g. "claude_web" -> "claudeweb"), or "" if the type has no fixed
+// type (e.g. "claude_web" -> "claude:web"), or "" if the type has no fixed
 // prefix (openai_compatible providers added via `am api add` keep whatever
-// name the user chose).
+// name the user chose, except known hosts like OpenRouter which get
+// "openrouter:api").
 func PoolIDPrefix(providerType string) string {
 	return poolIDPrefix[providerType]
 }
 
+// NextIDForPrefix returns FormatID(prefix, maxN+1) based on existing providers
+// whose ParseID prefix matches. Used when adding another OpenRouter (etc.) key.
+func NextIDForPrefix(path, prefix string) (string, error) {
+	f, err := LoadConfigFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	maxN := 0
+	if f != nil {
+		for _, p := range f.Providers {
+			pre, n, ok := types.ParseID(p.ID)
+			if ok && pre == prefix && n > maxN {
+				maxN = n
+			}
+			// Treat unnumbered openrouter:api as slot 1 for collision avoidance.
+			if prefix == "openrouter:api" && (p.ID == "openrouter" || p.ID == "openrouter:api") && maxN < 1 {
+				maxN = 1
+			}
+		}
+	}
+	return types.FormatID(prefix, maxN+1), nil
+}
+
+// IsOpenRouterEndpoint reports whether baseURL points at OpenRouter.
+func IsOpenRouterEndpoint(baseURL string) bool {
+	u := strings.ToLower(baseURL)
+	return strings.Contains(u, "openrouter.ai")
+}
+
 // MigrateLegacyIDs rewrites any provider in accounts.json still using one of
 // the old fixed literal IDs (claude-web, chatgpt-web, google-ai-studio,
-// github-models, groq) to the new "<prefix>:<NN>" format. Safe to call on
-// every run: once IDs are migrated it's a no-op. Custom `am api add` entries
-// (any ID not in legacyIDPrefix) are left untouched.
+// github-models, groq) or compact flat IDs (geminiapi:01, claudeweb:01, …)
+// to the brand[:method]:NN format. Also remaps account/msg fields in
+// usage.log, requests.log, and events.log. Safe to call on every run: once
+// migrated it's a no-op. Custom `am api add` entries stay untouched except
+// bare "openrouter" / "openrouter:api" → "openrouter:api:01".
 func MigrateLegacyIDs(path string) error {
 	f, err := LoadConfigFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			remapAccountLogs()
 			return nil
 		}
 		return err
 	}
 	if f == nil || len(f.Providers) == 0 {
+		remapAccountLogs()
 		return nil
 	}
 
@@ -142,10 +200,90 @@ func MigrateLegacyIDs(path string) error {
 		changed = true
 	}
 
+	// Compact → brand:method (geminiapi:01 → gemini:api:01).
+	used := map[string]bool{}
+	for _, p := range f.Providers {
+		used[p.ID] = true
+	}
+	for i, p := range f.Providers {
+		newID, ok := types.MigrateCompactID(p.ID)
+		if !ok || newID == p.ID || used[newID] {
+			continue
+		}
+		delete(used, p.ID)
+		used[newID] = true
+		f.Providers[i].ID = newID
+		changed = true
+	}
+
+	if changed {
+		if err := SaveConfigFile(path, f); err != nil {
+			return err
+		}
+	}
+	remapAccountLogs()
+	return nil
+}
+
+func remapAccountLogs() {
+	base := types.BaseDir()
+	_ = remapJSONLAccountFields(filepath.Join(base, "usage.log"))
+	_ = remapJSONLAccountFields(filepath.Join(base, "requests.log"))
+	_ = remapJSONLAccountFields(filepath.Join(base, "events.log"))
+}
+
+// remapJSONLAccountFields rewrites "account" values (and free-text "msg") in a
+// JSONL file from compact IDs (geminiapi:01) to brand:method form.
+func remapJSONLAccountFields(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	lines := strings.Split(string(data), "\n")
+	changed := false
+	for i, line := range lines {
+		trim := strings.TrimSpace(line)
+		if trim == "" {
+			continue
+		}
+		var m map[string]any
+		if json.Unmarshal([]byte(trim), &m) != nil {
+			continue
+		}
+		lineChanged := false
+		if acct, ok := m["account"].(string); ok {
+			if newID, ok2 := types.MigrateCompactID(acct); ok2 && newID != acct {
+				m["account"] = newID
+				lineChanged = true
+			}
+		}
+		if msg, ok := m["msg"].(string); ok {
+			if newMsg := types.RemapAccountIDsInText(msg); newMsg != msg {
+				m["msg"] = newMsg
+				lineChanged = true
+			}
+		}
+		if !lineChanged {
+			continue
+		}
+		b, err := json.Marshal(m)
+		if err != nil {
+			continue
+		}
+		lines[i] = string(b)
+		changed = true
+	}
 	if !changed {
 		return nil
 	}
-	return SaveConfigFile(path, f)
+	out := strings.Join(lines, "\n")
+	return os.WriteFile(path, []byte(out), 0o600)
 }
 
 // SetPriority updates the priority of one provider by ID and persists it. If
@@ -169,7 +307,7 @@ func SetPriority(path, id string, priority int) error {
 		}
 	}
 
-	if prefix, _, ok := types.ParseID(id); ok && prefix == "codexcli" {
+	if prefix, _, ok := types.ParseID(id); ok && (prefix == "codex" || prefix == "codexcli") {
 		f.Providers = append(f.Providers, ProviderConfig{ID: id, Type: "codex_cli", Priority: priority})
 		return SaveConfigFile(path, f)
 	}
@@ -177,8 +315,9 @@ func SetPriority(path, id string, priority int) error {
 	return fmt.Errorf("no provider with id %q in pool (see: am accounts)", id)
 }
 
-// SetEnabled turns a pool provider on or off. Disabled providers are skipped
-// by the pool picker (same as Enabled:false in accounts.json).
+// SetEnabled turns a pool provider on or off. Disabled (Enabled:false) means
+// removed from rotate/failover pool; the account stays in accounts.json and
+// can still be selected via X-Provider / X-Model on API requests.
 func SetEnabled(path, id string, enabled bool) error {
 	f, err := LoadConfigFile(path)
 	if err != nil && !os.IsNotExist(err) {
@@ -194,7 +333,7 @@ func SetEnabled(path, id string, enabled bool) error {
 			return SaveConfigFile(path, f)
 		}
 	}
-	if prefix, _, ok := types.ParseID(id); ok && prefix == "codexcli" {
+	if prefix, _, ok := types.ParseID(id); ok && (prefix == "codex" || prefix == "codexcli") {
 		v := enabled
 		f.Providers = append(f.Providers, ProviderConfig{ID: id, Type: "codex_cli", Enabled: &v})
 		return SaveConfigFile(path, f)
@@ -295,11 +434,39 @@ func BuildAdapter(p ProviderConfig) (types.ProviderAdapter, error) {
 	}
 }
 
-// LoadAccounts reads accounts from accounts.json, returning only configured/authenticated adapters.
+// LoadAccounts reads accounts from accounts.json, returning only rotate-pool
+// adapters (Enabled != false + credentials).
 func LoadAccounts(path string) ([]types.ProviderAdapter, error) {
+	return loadAccounts(path, true)
+}
+
+// LoadAllAddressable returns every adapter with credentials, including those
+// removed from the rotate pool (Enabled:false). Used for X-Provider routing.
+func LoadAllAddressable(path string) ([]types.ProviderAdapter, error) {
+	return loadAccounts(path, false)
+}
+
+// LookupAdapter builds one adapter by ID even when out of the rotate pool.
+func LookupAdapter(path, id string) (types.ProviderAdapter, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, fmt.Errorf("empty provider id")
+	}
+	all, err := LoadAllAddressable(path)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range all {
+		if a.ID() == id {
+			return a, nil
+		}
+	}
+	return nil, fmt.Errorf("provider %q not found or missing credentials", id)
+}
+
+func loadAccounts(path string, rotateOnly bool) ([]types.ProviderAdapter, error) {
 	var adapters []types.ProviderAdapter
 
-	// 1. Load accounts.json
 	var providers []ProviderConfig
 	b, err := os.ReadFile(path)
 	if err == nil {
@@ -307,8 +474,14 @@ func LoadAccounts(path string) ([]types.ProviderAdapter, error) {
 		if err := json.Unmarshal(b, &f); err == nil {
 			providers = f.Providers
 			for _, p := range f.Providers {
-				if !p.IsConfigured() {
-					continue
+				if rotateOnly {
+					if !p.IsConfigured() {
+						continue
+					}
+				} else {
+					if !p.HasCredentials() {
+						continue
+					}
 				}
 				a, err := BuildAdapter(p)
 				if err != nil {
@@ -320,13 +493,23 @@ func LoadAccounts(path string) ([]types.ProviderAdapter, error) {
 		}
 	}
 
-	// 2. Auto-surface the Codex CLI token-reuse adapter once `am add codex`
-	// has snapshotted a live login — no separate `am login codex` step. It
-	// has no secret-bearing accounts.json row of its own (see IsConfigured/
-	// BuildAdapter, which have no "codex_cli" case and so never touch it
-	// above); only an optional priority-override/opt-out row, consulted here.
 	if a := codexPoolAdapter(providers); a != nil {
-		adapters = append(adapters, a)
+		if rotateOnly {
+			adapters = append(adapters, a)
+		} else {
+			// Always include codex when credentials exist unless explicit opt-out
+			// and rotateOnly — for addressable, include even if disabled? If
+			// Enabled:false, codexPoolAdapter returns nil. Build manually:
+			adapters = append(adapters, a)
+		}
+	} else if !rotateOnly && CodexAuthAvailable() {
+		// Out-of-pool codex still addressable via X-Provider.
+		for i := range providers {
+			if providers[i].Type == "codex_cli" && providers[i].Enabled != nil && !*providers[i].Enabled {
+				adapters = append(adapters, &CodexCLIAdapter{AdapterID: codexPoolID(), PriorityLvl: providers[i].Priority})
+				break
+			}
+		}
 	}
 
 	return adapters, nil
@@ -388,7 +571,7 @@ func CodexAutoRow(providers []ProviderConfig) (ProviderConfig, bool) {
 
 // codexPoolID resolves the unified ID of the currently active codex
 // profile, falling back to the first saved codex profile, then to
-// "codexcli:01" if no profile has ever been saved (a bare `codex login`
+// "codex:01" if no profile has ever been saved (a bare `codex login`
 // with no `am add codex` snapshot yet).
 func codexPoolID() string {
 	metas := profile.ListProfiles("codex")
@@ -426,6 +609,96 @@ func SaveConfigFile(path string, f *AccountsFile) error {
 	return os.WriteFile(path, append(b, '\n'), 0o600)
 }
 
+// sameSecret reports whether two stored credential fields refer to the same
+// secret (resolved env: refs, or identical raw strings including env:FOO).
+func sameSecret(a, b string) bool {
+	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	ra, rb := strings.TrimSpace(ResolveSecret(a)), strings.TrimSpace(ResolveSecret(b))
+	return ra != "" && rb != "" && ra == rb
+}
+
+func providerSecrets(p ProviderConfig) []string {
+	var out []string
+	for _, s := range []string{p.APIKey, p.SessionToken, p.SessionKey} {
+		if strings.TrimSpace(s) != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// findDuplicateCredentialID returns another provider's ID that already owns
+// any of p's secrets (api key / session token / session key).
+func findDuplicateCredentialID(f *AccountsFile, p ProviderConfig, skipIDs ...string) string {
+	if f == nil {
+		return ""
+	}
+	secrets := providerSecrets(p)
+	if len(secrets) == 0 {
+		return ""
+	}
+	skip := map[string]bool{}
+	for _, id := range skipIDs {
+		if id != "" {
+			skip[id] = true
+		}
+	}
+	for _, existing := range f.Providers {
+		if skip[existing.ID] {
+			continue
+		}
+		for _, es := range providerSecrets(existing) {
+			for _, ps := range secrets {
+				if sameSecret(es, ps) {
+					return existing.ID
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// DeduplicateProvidersByCredential drops later entries that reuse an earlier
+// provider's API key / session token / session key. Keeps first occurrence.
+func DeduplicateProvidersByCredential(path string) (removed []string, err error) {
+	f, err := LoadConfigFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if f == nil || len(f.Providers) == 0 {
+		return nil, nil
+	}
+	var kept []ProviderConfig
+	seen := make([]ProviderConfig, 0, len(f.Providers))
+	for _, p := range f.Providers {
+		dupOf := ""
+		tmp := &AccountsFile{Providers: seen}
+		if id := findDuplicateCredentialID(tmp, p); id != "" {
+			dupOf = id
+		}
+		if dupOf != "" {
+			removed = append(removed, p.ID)
+			continue
+		}
+		seen = append(seen, p)
+		kept = append(kept, p)
+	}
+	if len(removed) == 0 {
+		return nil, nil
+	}
+	f.Providers = kept
+	return removed, SaveConfigFile(path, f)
+}
+
 func AddOrUpdateProvider(path string, p ProviderConfig) error {
 	f, err := LoadConfigFile(path)
 	if err != nil && !os.IsNotExist(err) {
@@ -433,6 +706,10 @@ func AddOrUpdateProvider(path string, p ProviderConfig) error {
 	}
 	if f == nil {
 		f = &AccountsFile{}
+	}
+
+	if dup := findDuplicateCredentialID(f, p, p.ID); dup != "" {
+		return &DuplicateAPIKeyError{ExistingID: dup}
 	}
 
 	updated := false

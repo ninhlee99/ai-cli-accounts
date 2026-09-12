@@ -277,11 +277,10 @@ func HandleClaudeMessages(w http.ResponseWriter, r *http.Request, pool *router.A
 		return err
 	}
 
-	ctx := r.Context()
 	started := time.Now()
-	stream, err := pool.Send(ctx, req)
+	stream, err := poolSend(r, pool, req)
 	if err != nil {
-		logChatRequest(r, pool, req, "", "", err.Error(), 0, 0, started)
+		logChatRequest(r, pool, req, "", "", err.Error(), 0, 0, started, nil)
 		http.Error(w, fmt.Sprintf("all providers failed: %v", err), http.StatusBadGateway)
 		return err
 	}
@@ -345,7 +344,7 @@ func HandleClaudeMessages(w http.ResponseWriter, r *http.Request, pool *router.A
 	}
 	err = json.NewEncoder(w).Encode(respObj)
 	recordPoolUsage(r, pool, req.Model, inputTokens, outputTokens)
-	logChatRequest(r, pool, req, fullContent.String(), finishReason, "", inputTokens, outputTokens, started)
+	logChatRequest(r, pool, req, fullContent.String(), finishReason, "", inputTokens, outputTokens, started, toolCalls)
 	return err
 }
 
@@ -508,7 +507,7 @@ func writeAnthropicSSE(w http.ResponseWriter, r *http.Request, pool *router.Acco
 	flusher.Flush()
 
 	recordPoolUsage(r, pool, req.Model, inputTokens, outputTokens)
-	logChatRequest(r, pool, req, fullContent.String(), finishReason, "", inputTokens, outputTokens, started)
+	logChatRequest(r, pool, req, fullContent.String(), finishReason, "", inputTokens, outputTokens, started, toolCalls)
 	return nil
 }
 
