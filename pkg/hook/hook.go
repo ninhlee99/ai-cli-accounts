@@ -178,6 +178,44 @@ func InstalledEvents() []string {
 	return events
 }
 
+// claudeSettingsEnvKeys are the vars we own inside settings["env"] — never
+// touch anything else a user put there themselves.
+var claudeSettingsEnvKeys = []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"}
+
+// SyncClaudeSettingsEnv mirrors the proxy's reachability into
+// ~/.claude/settings.json's "env" block, which Claude Code reads at the
+// start of every new session — independent of shell rc (`eval "$(am env)"`)
+// and launchctl (SyncLaunchctlEnv), both of which only reach processes
+// spawned *after* the change. A terminal/session already running when the
+// proxy goes up or down won't see this either, but every session opened
+// from that point on will, without the user needing to `eval` anything.
+//
+// proxyUp true  -> set ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN to proxyBase.
+// proxyUp false -> remove both keys so a new session falls through to the
+// real Anthropic API on whatever ANTHROPIC_API_KEY / subscription login it
+// already has.
+func SyncClaudeSettingsEnv(proxyUp bool, proxyBase string) error {
+	m := LoadClaudeSettings()
+	env, _ := m["env"].(map[string]any)
+	if env == nil {
+		env = map[string]any{}
+	}
+	if proxyUp {
+		env["ANTHROPIC_BASE_URL"] = proxyBase
+		env["ANTHROPIC_AUTH_TOKEN"] = "am-proxy"
+	} else {
+		for _, k := range claudeSettingsEnvKeys {
+			delete(env, k)
+		}
+	}
+	if len(env) == 0 {
+		delete(m, "env")
+	} else {
+		m["env"] = env
+	}
+	return SaveClaudeSettings(m)
+}
+
 // ShellRC returns the user's shell rc file for zsh/bash, or "" if the shell
 // isn't one we know how to wire automatically.
 func ShellRC() string {

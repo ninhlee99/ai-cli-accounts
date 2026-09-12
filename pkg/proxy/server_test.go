@@ -435,6 +435,65 @@ func TestHandler_AllDeadNoPoolNoAPIKeyRefusesInsteadOfReverseProxy(t *testing.T)
 	}
 }
 
+// TestHandler_AllProfilesDisabledUsesPoolNeverSubscription is the guarantee
+// behind `am accounts off` for every Claude Code profile: with every
+// profile disabled (ProfileCount()==0, not merely cooling/dead), a Claude
+// Code request (tools[] present, exactly like the real client sends) must
+// never reach Anthropic on the disabled account's subscription — it must
+// route through the provider pool instead, for both a tool-bearing agent
+// request and a plain chat-style one.
+//
+// This also locks in that ShouldFailoverToProviderPool()'s ProfileCount()>0
+// guard (see rotator.go) doesn't leave a hole: even though that guard alone
+// would return false when every profile is off (0 profiles > 0 is false),
+// Token() itself returns "" for a disabled account, so claudeUsable is false
+// and the switch in server.go's /v1/messages handler falls through to its
+// final `default: usePool = toolPool.Len() > 0` branch — never silently
+// escaping to the reverse-proxy on the proxy host's own credentials.
+func TestHandler_AllProfilesDisabledUsesPoolNeverSubscription(t *testing.T) {
+	rot := &Rotator{
+		tool:           "claude",
+		order:          []string{"a", "b"},
+		tokens:         map[string]*types.Token{"a": {Access: "tok-a"}, "b": {Access: "tok-b"}},
+		accounts:       map[string]string{},
+		cooldown:       map[string]time.Time{},
+		dead:           map[string]bool{},
+		disabled:       map[string]bool{"a": true, "b": true}, // `am off` on every profile
+		autoSwitches:   map[string]int{},
+		manualSwitches: map[string]int{},
+		usedThreshold:  DefaultUsedThreshold,
+	}
+	if got := rot.ProfileCount(); got != 0 {
+		t.Fatalf("test setup: expected ProfileCount()==0 with everything disabled, got %d", got)
+	}
+
+	h, _ := newHandlerWithRotator(t, rot, []types.ProviderAdapter{&stubAdapter{id: "stub"}})
+
+	toolBody := `{"model":"claude-sonnet-4-20250514","tools":[{"name":"Bash","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(toolBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code == http.StatusTeapot {
+		t.Fatalf("tool request must not reach the subscription reverse-proxy when every profile is off, got the reverse-proxy stub")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from pool fallback, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	plainBody := `{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"hi"}]}`
+	req = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(plainBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code == http.StatusTeapot {
+		t.Fatalf("plain request must not reach the subscription reverse-proxy when every profile is off, got the reverse-proxy stub")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from pool fallback, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // After a Claude cooldown expires, next request returns to Anthropic reverse-proxy.
 func TestHandler_ClaudeResetSwitchesBackFromPool(t *testing.T) {
 	rot := &Rotator{

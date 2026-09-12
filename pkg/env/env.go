@@ -45,11 +45,26 @@ func ShellQuote(s string) string {
 // /v1/messages like Anthropic. ANTHROPIC_BASE_URL is omitted when the
 // proxy is down so a new shell falls through to the real API.
 func PrintEnvExports(proxyUp bool, hasProfiles bool, proxyBase string) {
+	m := LoadEnvVars()
+
 	if proxyUp {
 		fmt.Printf("export ANTHROPIC_BASE_URL=%s\n", proxyBase)
 		fmt.Printf("export ANTHROPIC_AUTH_TOKEN=am-proxy\n")
+	} else {
+		// A shell that already ran `eval "$(am env)"` while the proxy was up
+		// has these exported in its live session. Omitting the line here
+		// (old behavior) left them stale once the proxy went down — the
+		// shell kept pointing at a dead port instead of falling through to
+		// api.anthropic.com. Unset explicitly, unless the user has their own
+		// override for these names via `am env set`.
+		if _, ok := m["ANTHROPIC_BASE_URL"]; !ok {
+			fmt.Printf("unset ANTHROPIC_BASE_URL\n")
+		}
+		if _, ok := m["ANTHROPIC_AUTH_TOKEN"]; !ok {
+			fmt.Printf("unset ANTHROPIC_AUTH_TOKEN\n")
+		}
 	}
-	m := LoadEnvVars()
+
 	names := make([]string, 0, len(m))
 	for k := range m {
 		names = append(names, k)

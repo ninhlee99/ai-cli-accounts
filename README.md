@@ -185,7 +185,15 @@ eval "$(am env)"   # ANTHROPIC_BASE_URL=http://127.0.0.1:8787 …
 claude             # hoặc: am run claude
 ```
 
-Hook SessionStart/End (`am hook install`) cũng bật/tắt proxy khi mở tab Claude Code.
+Hook SessionStart/End (`am hook install`) cũng bật/tắt proxy khi mở tab Claude Code. `am proxy up`/`am proxy down` tự đồng bộ 3 nơi cùng lúc để Claude Code luôn trỏ đúng, không cần user tự nhớ chạy lại `eval`:
+
+1. **`~/.claude/settings.json` (`env` block)** — Claude Code đọc field này mỗi khi mở **phiên mới**; đây là cách đáng tin cậy nhất vì không phụ thuộc shell.
+2. **`launchctl setenv`/`unsetenv`** (macOS) — cho app GUI (IDE, editor) không kế thừa shell rc.
+3. **Shell rc (`eval "$(am env)"`)** — cho terminal đã mở sẵn khi chạy lại `am env` thủ công.
+
+Khi `am proxy down` tắt hẳn daemon, cả 3 nơi trên đều được dọn sạch (`unset`, không chỉ "omit") — phiên Claude Code mới mở sau đó tự rơi về `api.anthropic.com` bằng subscription/API key sẵn có, không bị kẹt trỏ vào cổng proxy đã chết. **Lưu ý:** một session đang chạy dở từ trước khi đổi trạng thái proxy sẽ không tự thấy thay đổi (giới hạn vốn có của mọi set-env-at-start) — cần mở phiên mới hoặc `eval "$(am env)"` lại trong session đó.
+
+**Thứ tự ưu tiên khi proxy đang bật:** nếu account Claude subscription hiện tại còn dùng được (chưa bị `am accounts off`, chưa hết rate-limit), proxy ưu tiên reverse-proxy thẳng request Claude Code tới Anthropic bằng chính subscription đó — pool (`chatgpt`, `claude:web`, `gemini:web`, …) chỉ được dùng làm **failover** khi mọi account Claude không dùng được, hoặc khi ép rõ bằng `X-Provider`/`am sw <provider>`. Một account đã `am accounts off` không bao giờ được chọn — dù qua auto-rotate hay `X-Provider` trỏ thẳng ID.
 
 ### Cursor / Codex (cùng mid-layer)
 
