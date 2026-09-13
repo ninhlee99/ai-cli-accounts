@@ -364,6 +364,15 @@ func historyHasTools(hist []types.ChatMessage) bool {
 	return false
 }
 
+func findToolDef(by map[string]types.ToolDef, names ...string) (types.ToolDef, bool) {
+	for _, n := range names {
+		if d, ok := by[strings.ToLower(n)]; ok {
+			return d, true
+		}
+	}
+	return types.ToolDef{}, false
+}
+
 func extractForcedTools(text string, defs []types.ToolDef, hist []types.ChatMessage) []types.ToolCall {
 	by := map[string]types.ToolDef{}
 	for _, d := range defs {
@@ -373,12 +382,12 @@ func extractForcedTools(text string, defs []types.ToolDef, hist []types.ChatMess
 	var out []types.ToolCall
 
 	addRead := func(path string) {
-		d, ok := by["read"]
+		d, ok := findToolDef(by, "read", "read_file", "view_file")
 		if !ok || path == "" || already[path] {
 			return
 		}
 		already[path] = true
-		key := toolArgKey(d, "file_path", "path")
+		key := toolArgKey(d, "file_path", "path", "AbsolutePath")
 		b, _ := json.Marshal(map[string]string{key: path})
 		out = append(out, types.ToolCall{
 			ID:        fmt.Sprintf("toolu_web_ex_%d", len(out)+1),
@@ -388,11 +397,11 @@ func extractForcedTools(text string, defs []types.ToolDef, hist []types.ChatMess
 	}
 
 	addBash := func(cmd string) {
-		d, ok := by["bash"]
+		d, ok := findToolDef(by, "bash", "run_terminal_command", "run_command", "exec_command")
 		if !ok || strings.TrimSpace(cmd) == "" {
 			return
 		}
-		key := toolArgKey(d, "command")
+		key := toolArgKey(d, "command", "CommandLine", "cmd")
 		b, _ := json.Marshal(map[string]string{key: strings.TrimSpace(cmd)})
 		out = append(out, types.ToolCall{
 			ID:        fmt.Sprintf("toolu_web_ex_bash_%d", len(out)+1),
@@ -453,7 +462,7 @@ func extractForcedTools(text string, defs []types.ToolDef, hist []types.ChatMess
 		}
 	}
 
-	if _, hasBash := by["bash"]; hasBash {
+	if _, hasBash := findToolDef(by, "bash", "run_terminal_command", "run_command", "exec_command"); hasBash {
 		if reGitDiffCmd.MatchString(searchText) && !hasBashCommand(out, "git diff") {
 			addBash("git diff --stat && git diff")
 		}
@@ -470,8 +479,8 @@ func extractForcedTools(text string, defs []types.ToolDef, hist []types.ChatMess
 		return nil
 	}
 
-	if d, ok := by["bash"]; ok && !historyHasTools(hist) && !hasBashCommand(out, "") {
-		key := toolArgKey(d, "command")
+	if d, ok := findToolDef(by, "bash", "run_terminal_command", "run_command", "exec_command"); ok && !historyHasTools(hist) && !hasBashCommand(out, "") {
+		key := toolArgKey(d, "command", "CommandLine", "cmd")
 		b, _ := json.Marshal(map[string]string{key: "git status -sb && git diff --stat && git diff -- README.md"})
 		out = append(out, types.ToolCall{ID: "toolu_web_ex_bash", Name: d.Name, Arguments: string(b)})
 	}
@@ -530,13 +539,13 @@ func fallbackExploreTools(defs []types.ToolDef) []types.ToolCall {
 		by[strings.ToLower(d.Name)] = d
 	}
 	var out []types.ToolCall
-	if d, ok := by["read"]; ok {
-		key := toolArgKey(d, "file_path", "path")
+	if d, ok := findToolDef(by, "read", "read_file", "view_file"); ok {
+		key := toolArgKey(d, "file_path", "path", "AbsolutePath")
 		b, _ := json.Marshal(map[string]string{key: "README.md"})
 		out = append(out, types.ToolCall{ID: "toolu_web_fb_1", Name: d.Name, Arguments: string(b)})
 	}
-	if d, ok := by["bash"]; ok {
-		key := toolArgKey(d, "command")
+	if d, ok := findToolDef(by, "bash", "run_terminal_command", "run_command", "exec_command"); ok {
+		key := toolArgKey(d, "command", "CommandLine", "cmd")
 		b, _ := json.Marshal(map[string]string{key: "git status -sb && git diff --stat && git diff -- README.md"})
 		out = append(out, types.ToolCall{ID: "toolu_web_fb_2", Name: d.Name, Arguments: string(b)})
 	}
