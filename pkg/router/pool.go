@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,10 +15,13 @@ import (
 	"amux-accounts/pkg/types"
 )
 
-// scrubBeforeSend is the universal outbound gate: every adapter path
+// redactBeforeSend is the universal outbound gate: every adapter path
 // (proxy bridge, am chat, tests) must pass here before network I/O.
-func scrubBeforeSend(req *types.ChatRequest) {
-	res := privacy.ScrubChatRequest(req)
+func redactBeforeSend(req *types.ChatRequest) {
+	if !privacy.Enabled {
+		return
+	}
+	res := privacy.RedactChatRequest(req)
 	if res.Len() == 0 {
 		return
 	}
@@ -80,12 +84,37 @@ func (r *AccountPoolRouter) SetDirectory(adapters []types.ProviderAdapter) {
 	r.directory = dir
 }
 
+// applyTaskClassification inspects the request and dynamically enables thinking
+// mode or escalates to Pro tier when heavy analytical reasoning is required.
+func applyTaskClassification(req *types.ChatRequest) {
+	if req == nil {
+		return
+	}
+	c := ClassifyTask(req)
+	if c.IsHeavy && req.TargetTier == "" {
+		req.TargetTier = "pro"
+		log.Printf("router: heavy task detected (%s) -> escalated to Pro tier", strings.Join(c.Reasons, ", "))
+	}
+	if c.NeedsThinking && !req.Thinking {
+		req.Thinking = true
+		if req.ReasoningEffort == "" {
+			req.ReasoningEffort = c.ReasoningEffort
+		}
+		if req.ThinkingBudget <= 0 {
+			req.ThinkingBudget = 2048
+		}
+		log.Printf("router: auto-enabled thinking mode (effort: %s, budget: %d, reasons: %s)",
+			req.ReasoningEffort, req.ThinkingBudget, strings.Join(c.Reasons, ", "))
+	}
+}
+
 // SendNamed routes to one adapter by ID (rotate pool or out-of-pool directory).
 func (r *AccountPoolRouter) SendNamed(ctx context.Context, id string, req *types.ChatRequest) (<-chan types.StreamChunk, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	scrubBeforeSend(req)
+	applyTaskClassification(req)
+	redactBeforeSend(req)
 	r.mu.RLock()
 	a := r.directory[id]
 	r.mu.RUnlock()
@@ -153,16 +182,39 @@ func (r *AccountPoolRouter) Len() int {
 	return len(r.adapters)
 }
 
+type toolCapability interface {
+	SupportsTools() bool
+}
+
+func adapterSupportsTools(a types.ProviderAdapter) bool {
+	if t, ok := a.(toolCapability); ok {
+		return t.SupportsTools()
+	}
+	return true
+}
+
+// skipWebWhenTools: off while testing Claude Code against chatgpt/claude/gemini web.
+const skipWebWhenTools = false
+
+func skipTextOnly(a types.ProviderAdapter, req *types.ChatRequest) bool {
+	return skipWebWhenTools && req != nil && len(req.Tools) > 0 && !adapterSupportsTools(a)
+}
+
 // Send tries adapters in priority order. With a preferred pin (`am sw`):
 // try that adapter first; on rate-limit only, fail over and promote the
 // winner to preferred so status shows the auto-switch. Other errors stay
 // pinned (no silent jump to Gemini). Without a pin: normal priority
 // failover, and any failover winner is promoted to preferred.
+//
+// Client tool loops (Claude Code / Cursor / Codex) send tools[]. Text-only
+// web backends cannot emit tool_use — skip them unless the caller pinned
+// via SendNamed (X-Provider).
 func (r *AccountPoolRouter) Send(ctx context.Context, req *types.ChatRequest) (<-chan types.StreamChunk, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	scrubBeforeSend(req)
+	applyTaskClassification(req)
+	redactBeforeSend(req)
 
 	r.mu.RLock()
 	preferredID := r.preferred
@@ -177,6 +229,11 @@ func (r *AccountPoolRouter) Send(ctx context.Context, req *types.ChatRequest) (<
 		for _, a := range adapters {
 			if a.ID() != preferredID {
 				continue
+			}
+			if skipTextOnly(a, req) {
+				skippedPreferred = true
+				errs = append(errs, fmt.Errorf("%s: skip text-only backend (client sent tools)", a.ID()))
+				break
 			}
 			if r.cooling(a.ID()) {
 				skippedPreferred = true
@@ -205,6 +262,9 @@ func (r *AccountPoolRouter) Send(ctx context.Context, req *types.ChatRequest) (<
 
 	for _, a := range adapters {
 		if preferredID != "" && a.ID() == preferredID {
+			continue
+		}
+		if skipTextOnly(a, req) {
 			continue
 		}
 		if r.cooling(a.ID()) {

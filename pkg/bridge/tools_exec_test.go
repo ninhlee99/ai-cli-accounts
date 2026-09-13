@@ -225,3 +225,24 @@ func TestCursorBridge_StreamingToolCalls(t *testing.T) {
 		t.Fatalf("missing DONE: %s", out)
 	}
 }
+
+func TestClaudeBridge_StreamEmitsStartAndPing(t *testing.T) {
+	adapter := &toolCallAdapter{id: "chatgpt:01", text: "ok"}
+	pool := router.NewAccountPoolRouter([]types.ProviderAdapter{adapter})
+	body := []byte(`{"model":"claude-opus-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	if err := bridge.HandleClaudeMessages(rec, req, pool, body); err != nil {
+		t.Fatal(err)
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, "event: message_start") {
+		t.Fatalf("missing message_start: %s", out)
+	}
+	if !strings.Contains(out, "event: ping") {
+		t.Fatalf("missing ping: %s", out)
+	}
+	if !strings.Contains(out, "event: message_stop") {
+		t.Fatalf("missing message_stop: %s", out)
+	}
+}

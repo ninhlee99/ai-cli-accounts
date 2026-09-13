@@ -37,7 +37,7 @@ type RequestEntry struct {
 	// Tools = model-requested tool names; ToolStatus "" | "ok" | "err".
 	Tools      []string `json:"tools,omitempty"`
 	ToolStatus string   `json:"tool_status,omitempty"`
-	// Redactions = privacy scrub kinds replaced before outbound send
+	// Redactions = privacy redact kinds replaced before outbound send
 	// (e.g. "email", "api_key"). Never contains original secrets.
 	Redactions []string `json:"redactions,omitempty"`
 }

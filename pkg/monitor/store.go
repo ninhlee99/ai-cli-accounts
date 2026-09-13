@@ -16,6 +16,7 @@ const (
 	maxEventLines   = 2000
 	maxRequestLines = 500
 	previewRunes    = 240
+	outputRunes     = 64000
 )
 
 var (
@@ -37,7 +38,7 @@ func AppendRequest(e types.RequestEntry) {
 		e.Time = time.Now()
 	}
 	e.Input = TruncateRunes(e.Input, previewRunes)
-	e.Output = TruncateRunes(e.Output, previewRunes)
+	e.Output = TruncateRunes(e.Output, outputRunes)
 	appendJSONL(requestsPath(), e, maxRequestLines)
 }
 

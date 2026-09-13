@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"amux-accounts/pkg/tools"
 	"amux-accounts/pkg/types"
 )
 
@@ -57,6 +58,9 @@ var (
 
 func (a *GeminiWebAdapter) ID() string    { return a.AdapterID }
 func (a *GeminiWebAdapter) Priority() int { return a.PriorityLvl }
+
+// SupportsTools is false: Gemini web StreamGenerate is text-only.
+func (a *GeminiWebAdapter) SupportsTools() bool { return false }
 
 func (a *GeminiWebAdapter) client() *http.Client {
 	if a.HTTPClient != nil {
@@ -109,7 +113,7 @@ func (a *GeminiWebAdapter) SendMessageStream(ctx context.Context, req *types.Cha
 			sendChunk(ctx, out, types.StreamChunk{ID: a.AdapterID, Content: text})
 			sendChunk(ctx, out, types.StreamChunk{ID: a.AdapterID, Done: true})
 		}()
-		return out, nil
+		return tools.MaybeWrapWebStream(a.AdapterID, req, out), nil
 	}
 	return nil, types.ErrRateLimitReached
 }

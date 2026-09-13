@@ -97,6 +97,35 @@ func TestAccountPoolRouter_MultiSessionFailover(t *testing.T) {
 	}
 }
 
+type textOnlyAdapter struct {
+	mockAdapter
+}
+
+func (m *textOnlyAdapter) SupportsTools() bool { return false }
+
+func TestAccountPoolRouter_SkipTextOnlyWhenTools(t *testing.T) {
+	web := &textOnlyAdapter{mockAdapter: mockAdapter{id: "chatgpt:01", priority: 1, content: "run this yourself:\ngit diff"}}
+	api := &mockAdapter{id: "gemini:api:01", priority: 2, content: "ok"}
+	r := router.NewAccountPoolRouter([]types.ProviderAdapter{web, api})
+	r.SetPreferred("chatgpt:01")
+
+	ch, err := r.Send(context.Background(), &types.ChatRequest{
+		Messages: []types.ChatMessage{{Role: "user", Content: "review readme"}},
+		Tools:    []types.ToolDef{{Name: "Bash"}},
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	var text string
+	for chunk := range ch {
+		text += chunk.Content
+	}
+	// skipWebWhenTools is off for web-proxy testing — preferred web answers.
+	if text != "run this yourself:\ngit diff" {
+		t.Fatalf("want web preferred, got %q", text)
+	}
+}
+
 func TestAccountPoolRouter_AllFail(t *testing.T) {
 	a1 := &mockAdapter{id: "p1", priority: 1, err: errors.New("err1")}
 	a2 := &mockAdapter{id: "p2", priority: 2, err: errors.New("err2")}

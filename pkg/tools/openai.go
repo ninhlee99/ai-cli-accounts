@@ -30,12 +30,13 @@ type OpenAIToolCall struct {
 }
 
 type openAIChatRequest struct {
-	Model       string           `json:"model"`
-	Messages    []map[string]any `json:"messages"`
-	Stream      bool             `json:"stream"`
-	Temperature float64          `json:"temperature,omitempty"`
-	Tools       []openAITool     `json:"tools,omitempty"`
-	ToolChoice  any              `json:"tool_choice,omitempty"`
+	Model           string           `json:"model"`
+	Messages        []map[string]any `json:"messages"`
+	Stream          bool             `json:"stream"`
+	Temperature     float64          `json:"temperature,omitempty"`
+	Tools           []openAITool     `json:"tools,omitempty"`
+	ToolChoice      any              `json:"tool_choice,omitempty"`
+	ReasoningEffort string           `json:"reasoning_effort,omitempty"`
 }
 
 func parseOpenAITools(body []byte) ([]types.ToolDef, error) {
@@ -109,6 +110,11 @@ func toOpenAIChatRequest(req *types.ChatRequest) *openAIChatRequest {
 		Stream:      req.Stream,
 		Temperature: req.Temperature,
 		ToolChoice:  req.ToolChoice,
+	}
+	if req.ReasoningEffort != "" {
+		out.ReasoningEffort = req.ReasoningEffort
+	} else if req.Thinking {
+		out.ReasoningEffort = "medium"
 	}
 	if len(req.Tools) > 0 {
 		out.Tools = toOpenAITools(req.Tools)

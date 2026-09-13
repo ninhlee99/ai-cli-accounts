@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
@@ -44,6 +45,19 @@ func (a *OpenAICompatibleAdapter) client() *http.Client {
 func (a *OpenAICompatibleAdapter) SendMessageStream(ctx context.Context, req *types.ChatRequest) (<-chan types.StreamChunk, error) {
 	body := *req
 	body.Model = a.TargetModel
+
+	// Auto-escalation for Google AI Studio / Gemini endpoint when heavy/analytical task is detected
+	if strings.Contains(a.BaseURL, "generativelanguage.googleapis.com") {
+		if strings.EqualFold(req.TargetTier, "pro") || req.Thinking {
+			if strings.Contains(body.Model, "flash") || strings.Contains(body.Model, "claude") {
+				body.Model = "gemini-3.1-pro-preview"
+				log.Printf("%s: heavy/analytical task -> auto-switched Gemini model from %s to %s", a.AdapterID, a.TargetModel, body.Model)
+			}
+		}
+		if body.Model == "gemini-3.1-pro" {
+			body.Model = "gemini-3.1-pro-preview"
+		}
+	}
 	body.Stream = true
 
 	payload, err := tools.MarshalOpenAIChatRequest(&body)
@@ -160,8 +174,10 @@ func streamOpenAISSE(ctx context.Context, id string, resp *http.Response, out ch
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content   string          `json:"content"`
-					ToolCalls []deltaToolCall `json:"tool_calls"`
+					Content          string          `json:"content"`
+					ReasoningContent string          `json:"reasoning_content"`
+					Reasoning        string          `json:"reasoning"`
+					ToolCalls        []deltaToolCall `json:"tool_calls"`
 				} `json:"delta"`
 				FinishReason *string `json:"finish_reason"`
 			} `json:"choices"`
@@ -186,6 +202,15 @@ func streamOpenAISSE(ctx context.Context, id string, resp *http.Response, out ch
 			continue
 		}
 		choice := chunk.Choices[0]
+		reasoning := choice.Delta.ReasoningContent
+		if reasoning == "" {
+			reasoning = choice.Delta.Reasoning
+		}
+		if reasoning != "" {
+			if !sendChunk(ctx, out, types.StreamChunk{ID: id, Thinking: reasoning}) {
+				return
+			}
+		}
 		if choice.Delta.Content != "" {
 			if !sendChunk(ctx, out, types.StreamChunk{ID: id, Content: choice.Delta.Content}) {
 				return

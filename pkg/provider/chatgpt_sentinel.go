@@ -144,8 +144,7 @@ func solveChatGPTPoW(seed, difficulty, userAgent string) (string, error) {
 			return "gAAAAAB" + base, nil
 		}
 	}
-	fallback := base64.StdEncoding.EncodeToString([]byte(`"` + seed + `"`))
-	return "gAAAAABwQ8Lk5FbGpA2NcR9dShT6gYjU7VxZ4D" + fallback, nil
+	return "", fmt.Errorf("chatgpt sentinel: pow difficulty exceeded (failed to solve within 500k iterations)")
 }
 
 func setChatGPTWebHeaders(req *http.Request, accessToken, accountID, deviceID string, sse bool) {

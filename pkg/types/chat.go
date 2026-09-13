@@ -67,6 +67,14 @@ type ChatRequest struct {
 	// ClientDialect hints which wire format the HTTP client spoke
 	// ("anthropic", "openai", "gemini"). Used by bridges when emitting.
 	ClientDialect string `json:"-"`
+	// Thinking enables reasoning / extended thinking mode.
+	Thinking bool `json:"thinking,omitempty"`
+	// ThinkingBudget specifies max reasoning tokens (e.g. 1024, 2048).
+	ThinkingBudget int `json:"thinking_budget,omitempty"`
+	// ReasoningEffort mirrors OpenAI reasoning_effort ("low", "medium", "high").
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// TargetTier requests a specific model class: "flash" (fast), "pro" (heavy/reasoning), or "" (auto).
+	TargetTier string `json:"target_tier,omitempty"`
 }
 
 // StreamChunk is one piece of a streamed reply. The producer closes the
@@ -74,10 +82,13 @@ type ChatRequest struct {
 type StreamChunk struct {
 	ID           string
 	Content      string
+	Thinking     string     // reasoning/thinking tokens emitted by the model
 	ToolCalls    []ToolCall // set when the model requests tool use
 	FinishReason string     // "stop", "tool_calls", "end_turn", ...
 	Done         bool
 	Error        error
+	// LogText is the raw provider reply for watch (not sent to the client).
+	LogText string
 }
 
 // ProviderAdapter is implemented by every chat backend the router can

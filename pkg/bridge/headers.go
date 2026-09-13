@@ -31,13 +31,14 @@ func explicitProviderHeaders(r *http.Request, req *types.ChatRequest) (providerI
 }
 
 func poolSend(r *http.Request, pool *router.AccountPoolRouter, req *types.ChatRequest) (<-chan types.StreamChunk, error) {
-	// Last line of defense: scrub structured chat before any adapter hits the network.
-	if res := privacy.ScrubChatRequest(req); res.Len() > 0 {
-		dialect := "privacy"
-		if req != nil && req.ClientDialect != "" {
-			dialect = req.ClientDialect
+	if privacy.Enabled {
+		if res := privacy.RedactChatRequest(req); res.Len() > 0 {
+			dialect := "privacy"
+			if req != nil && req.ClientDialect != "" {
+				dialect = req.ClientDialect
+			}
+			privacy.LogHits(r, res, dialect)
 		}
-		privacy.LogHits(r, res, dialect)
 	}
 	if id := explicitProviderHeaders(r, req); id != "" {
 		return pool.SendNamed(r.Context(), id, req)

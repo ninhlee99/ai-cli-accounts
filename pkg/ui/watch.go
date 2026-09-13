@@ -142,20 +142,45 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scroll = 0
 			m.refresh()
 		case "up", "k":
-			if m.scroll > 0 {
+			if m.logsFollowTab() {
+				m.scroll++
+				m.clampScroll()
+			} else if m.scroll > 0 {
 				m.scroll--
 			}
 		case "down", "j":
-			m.scroll++
-			m.clampScroll()
+			if m.logsFollowTab() {
+				if m.scroll > 0 {
+					m.scroll--
+				}
+			} else {
+				m.scroll++
+				m.clampScroll()
+			}
 		case "pgup":
-			m.scroll -= 3
-			if m.scroll < 0 {
-				m.scroll = 0
+			if m.logsFollowTab() {
+				m.scroll += 3
+				m.clampScroll()
+			} else {
+				m.scroll -= 3
+				if m.scroll < 0 {
+					m.scroll = 0
+				}
 			}
 		case "pgdown":
-			m.scroll += 3
-			m.clampScroll()
+			if m.logsFollowTab() {
+				m.scroll -= 3
+				if m.scroll < 0 {
+					m.scroll = 0
+				}
+			} else {
+				m.scroll += 3
+				m.clampScroll()
+			}
+		case "g", "G":
+			if m.logsFollowTab() {
+				m.scroll = 0
+			}
 		}
 		return m, nil
 	}
@@ -320,10 +345,16 @@ func (m *watchModel) updateUsageKey(key string) bool {
 	return false
 }
 
+func (m watchModel) logsFollowTab() bool {
+	return m.activeTab == int(tabDash) || m.activeTab == int(tabActivity)
+}
+
 func (m *watchModel) clampScroll() {
 	w, h := m.contentSize()
 	max := 0
 	switch m.activeTab {
+	case int(tabDash):
+		max = dashLogsMaxScroll(w, h, m.snap)
 	case int(tabActivity):
 		max = activityMaxScroll(w, h, m.snap)
 	case int(tabAccounts):
@@ -381,16 +412,14 @@ func (m watchModel) updateEdit(key string) (tea.Model, tea.Cmd) {
 }
 
 func (m watchModel) contentSize() (int, int) {
-	w := m.width
-	h := m.height - 3 /*header*/ - 1 /*footer*/
+	w := maxInt(m.width, 1)
+	headH := 1
 	if m.activeTab != int(tabDash) {
-		h -= 1 // filter chrome row
+		headH = 2
 	}
-	if w < 60 {
-		w = 60
-	}
-	if h < 10 {
-		h = 10
+	h := m.height - headH - 1 // footer
+	if h < 1 {
+		h = 1
 	}
 	return w, h
 }
@@ -411,13 +440,17 @@ func (m watchModel) View() string {
 	case int(tabActivity):
 		body = panelActivityMerged(w, h, m.snap, m.scroll)
 	}
+	body = lipgloss.NewStyle().
+		Width(w).Height(h).
+		MaxWidth(w).MaxHeight(h).
+		Align(lipgloss.Left, lipgloss.Top).
+		Render(body)
 	full := lipgloss.JoinVertical(lipgloss.Left,
 		m.renderHeader(),
-		// Fixed height so keyboard footer always sticks to screen bottom.
-		lipgloss.NewStyle().Width(m.width).Height(h).Align(lipgloss.Left, lipgloss.Top).Render(body),
+		body,
 		m.renderFooter(),
 	)
-	return appStyle.Render(full)
+	return clipText(appStyle.Render(full), maxInt(m.width, 1), maxInt(m.height, 1))
 }
 
 func (m watchModel) renderHeader() string {
@@ -437,7 +470,7 @@ func (m watchModel) renderHeader() string {
 		gap = 1
 	}
 	line := brand + strings.Repeat(" ", gap) + tabRow
-	head := headerBar.Width(m.width).Render(line)
+	head := headerBar.Width(m.width).MaxWidth(m.width).MaxHeight(1).Render(line)
 
 	if m.activeTab == int(tabDash) {
 		return head
@@ -481,7 +514,7 @@ func (m watchModel) renderHeader() string {
 	if m.activeTab == int(tabAccounts) {
 		extra += "  ·  " + rowDim.Render("↑↓ scroll · limits live via proxy (~0.8s)")
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, head, headerBar.Width(m.width).Render(extra))
+	return lipgloss.JoinVertical(lipgloss.Left, head, headerBar.Width(m.width).MaxWidth(m.width).MaxHeight(1).Render(extra))
 }
 
 func (m watchModel) renderFooter() string {
@@ -500,7 +533,11 @@ func (m watchModel) renderFooter() string {
 			keyStyle.Render("q") + " quit",
 		}
 		switch m.activeTab {
-		case int(tabAccounts), int(tabActivity):
+		case int(tabDash):
+			sections = append([]string{keyStyle.Render("↑") + " older", keyStyle.Render("↓/G") + " follow"}, sections...)
+		case int(tabActivity):
+			sections = append([]string{keyStyle.Render("↑") + " older", keyStyle.Render("↓/G") + " follow", keyStyle.Render("/") + " filter", keyStyle.Render("c") + " clear"}, sections...)
+		case int(tabAccounts):
 			sections = append([]string{keyStyle.Render("↑↓/jk") + " scroll", keyStyle.Render("/") + " filter", keyStyle.Render("c") + " clear"}, sections...)
 		case int(tabUsage):
 			sections = append([]string{
@@ -513,36 +550,35 @@ func (m watchModel) renderFooter() string {
 		}
 	}
 	line := strings.Join(sections, sep)
-	return footerBar.Width(m.width).Render(line)
+	return footerBar.Width(m.width).MaxWidth(m.width).MaxHeight(1).Render(line)
 }
 
 func (m watchModel) viewDash(w, h int) string {
 	if w < 100 {
-		half := h / 3
+		slot := maxInt(h/5, 1)
+		logsH := maxInt(h-slot*4, 1)
 		return lipgloss.JoinVertical(lipgloss.Left,
-			panelProxy(w, half, m.snap),
-			panelAccounts(w, half, m.snap),
-			panelPool(w, half, m.snap),
-			panelUsage(w, half, m.snap, false, periodLabels[m.uPeriod]),
-			panelActivity(w, half, m.snap, half-4),
-			panelRequests(w, half, m.snap, half-4),
+			panelProxy(w, slot, m.snap),
+			panelAccounts(w, slot, m.snap),
+			panelPool(w, slot, m.snap),
+			panelUsage(w, slot, m.snap, false, periodLabels[m.uPeriod]),
+			panelLogsOnly(w, logsH, m.snap, m.scroll),
 		)
 	}
-	colW := (w - 4) / 3
-	rowH := h / 2
+	gap := 1
+	colW := maxInt((w-2*gap)/3, 8)
+	topH := maxInt(h/2, 1)
+	botH := maxInt(h-topH, 1)
 	col1 := lipgloss.JoinVertical(lipgloss.Left,
-		panelProxy(colW, rowH-2, m.snap),
-		panelAccounts(colW, h-(rowH-2), m.snap),
+		panelProxy(colW, topH, m.snap),
+		panelAccounts(colW, botH, m.snap),
 	)
 	col2 := lipgloss.JoinVertical(lipgloss.Left,
-		panelPool(colW, rowH-2, m.snap),
-		panelUsage(colW, h-(rowH-2), m.snap, false, "7d"),
+		panelPool(colW, topH, m.snap),
+		panelUsage(colW, botH, m.snap, false, "7d"),
 	)
-	col3 := lipgloss.JoinVertical(lipgloss.Left,
-		panelActivity(colW, rowH-2, m.snap, rowH-4),
-		panelRequests(colW, h-(rowH-2), m.snap, h-rowH-2),
-	)
-	return lipgloss.JoinHorizontal(lipgloss.Top, col1, " ", col2, " ", col3)
+	col3 := panelLogsOnly(colW, h, m.snap, m.scroll)
+	return lipgloss.JoinHorizontal(lipgloss.Top, col1, strings.Repeat(" ", gap), col2, strings.Repeat(" ", gap), col3)
 }
 
 // CmdWatch runs the Bubble Tea monitoring dashboard.

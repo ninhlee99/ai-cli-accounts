@@ -228,8 +228,8 @@ func TestBuildAdapter_DefaultsAndMissing(t *testing.T) {
 		t.Errorf("expected default model gpt-4o, got %s", oa.TargetModel)
 	}
 
-	if _, err := BuildAdapter(ProviderConfig{Type: "duckduckgo"}); err == nil {
-		t.Fatal("expected duckduckgo type to be unsupported")
+	if _, err := BuildAdapter(ProviderConfig{Type: "unknown"}); err == nil {
+		t.Fatal("expected unknown type to be unsupported")
 	}
 }
 

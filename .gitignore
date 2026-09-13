@@ -2,6 +2,11 @@
 /amux
 /ai-cli-accounts
 /amux-accounts
+/bin/
 .am/
 *.amexp
 all-account*
+*.diff
+.claude/perf-review.md
+.claude/worktrees/
+

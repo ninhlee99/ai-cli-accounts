@@ -5,6 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"sync"
+	"syscall"
 	"time"
 
 	"amux-accounts/pkg/types"
@@ -152,9 +156,43 @@ func RefreshedCredsJSON(original []byte, rr *OAuthRefreshResponse, oldRefresh st
 	return out, expiresAt, nil
 }
 
+var refreshLiveClaudeMu sync.Mutex
+
+func acquireRefreshFileLock() (func(), error) {
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "."
+	}
+	dir := filepath.Join(home, ".am")
+	_ = os.MkdirAll(dir, 0700)
+	lockPath := filepath.Join(dir, "token_refresh.lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return func() {}, nil
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
+}
+
 // RefreshLiveClaudeToken attempts to refresh the token currently in Keychain.
+// Synchronized with in-process mutex and cross-process file lock (flock).
+// Also re-checks if another process/goroutine already refreshed the token before making network calls.
 func RefreshLiveClaudeToken() (string, error) {
+	refreshLiveClaudeMu.Lock()
+	defer refreshLiveClaudeMu.Unlock()
+
+	unlockFile, _ := acquireRefreshFileLock()
+	defer unlockFile()
+
+	// 1. Re-check if another process or thread already refreshed the token
 	live := LiveKeychainToken()
+	if live != nil && live.Access != "" && live.ExpiresAt.After(time.Now().Add(RefreshLead)) {
+		return live.Access, nil
+	}
+
 	if live == nil {
 		return "", fmt.Errorf("no live keychain token")
 	}

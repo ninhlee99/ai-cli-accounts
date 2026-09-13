@@ -1,4 +1,4 @@
-// Package privacy scrubs sensitive data from outbound chat payloads before
+// Package privacy redacts sensitive data from outbound chat payloads before
 // they leave the local proxy toward Claude / third-party APIs.
 //
 // Goal: block account takeover, identity theft, financial fraud, stalking /
@@ -6,6 +6,8 @@
 package privacy
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -24,10 +26,15 @@ type Hit struct {
 	Count  int    // how many times this kind was replaced in one pass
 }
 
-// Result is the outcome of a scrub pass.
+// Result is the outcome of a redact pass.
 type Result struct {
 	Hits []Hit
 }
+
+// Enabled gates outbound redact at proxy/bridge/pool call sites.
+// Tests call Redact* directly and ignore this flag.
+// Off: raw payload to web/API so Claude Code tool loop can be tested.
+var Enabled = false
 
 // Len returns total replacement occurrences across kinds.
 func (r Result) Len() int {
@@ -56,7 +63,7 @@ func (r Result) Summary() string {
 	for _, h := range r.Hits {
 		parts = append(parts, fmt.Sprintf("%s×%d→%s", h.Kind, h.Count, truncate(h.Sample, 32)))
 	}
-	return "privacy scrub: " + strings.Join(parts, "; ")
+	return "privacy redact: " + strings.Join(parts, "; ")
 }
 
 type rule struct {
@@ -66,7 +73,7 @@ type rule struct {
 	replace func(matched string) string // nil → use sample
 }
 
-// samples that must never be treated as secrets (idempotent re-scrub).
+// samples that must never be treated as secrets (idempotent re-redact).
 var knownSamples = map[string]struct{}{
 	"sample@example.com":            {},
 	"+1-555-0100":                   {},
@@ -101,6 +108,7 @@ var knownSamples = map[string]struct{}{
 	"https://sample:sample@example.com/":       {},
 	"/Users/sample":                            {},
 	"/home/sample":                             {},
+	"C:/Users/sample":                          {},
 	`C:\Users\sample`:                          {},
 	"203.0.113.10":                             {}, // TEST-NET-3
 	"2001:db8::sample":                         {},
@@ -716,22 +724,10 @@ func init() {
 			sample: "0.000000,0.000000",
 			re:     regexp.MustCompile(`\b-?\d{1,2}\.\d{4,},\s*-?\d{1,3}\.\d{4,}\b`),
 		},
-		{
-			kind:   "home_path",
-			sample: "/Users/sample",
-			re:     regexp.MustCompile(`(?i)(?:/Users|/home)/[^/\s"'\\]+`),
-			replace: func(m string) string {
-				if strings.HasPrefix(strings.ToLower(m), "/home/") {
-					return "/home/sample"
-				}
-				return "/Users/sample"
-			},
-		},
-		{
-			kind:   "home_path",
-			sample: `C:\Users\sample`,
-			re:     regexp.MustCompile(`(?i)C:\\Users\\[^\\\s"']+`),
-		},
+		// home_path is intentionally omitted: Claude Code / Cursor send
+		// cwd and file paths in system + tool_result. Rewriting
+		// /Users/<name> → /Users/sample makes the model dump shell
+		// instead of tool_use (client then cannot execute).
 		{
 			kind:   "address_label",
 			sample: "address:123 Sample Street",
@@ -816,8 +812,8 @@ func isSample(s string) bool {
 	return false
 }
 
-// ScrubString replaces sensitive spans with sample placeholders.
-func ScrubString(in string) (string, Result) {
+// RedactString replaces sensitive spans with sample placeholders.
+func RedactString(in string) (string, Result) {
 	if in == "" {
 		return in, Result{}
 	}
@@ -854,20 +850,84 @@ func ScrubString(in string) (string, Result) {
 	return out, Result{Hits: hits}
 }
 
-// ScrubBytes scrubs a raw request body (JSON or plain text).
-func ScrubBytes(body []byte) ([]byte, Result) {
+// RedactBytes redacts a raw request body (JSON or plain text).
+// JSON is walked as decoded strings then re-marshaled — never rewrite raw
+// bytes, or valid escapes like `\s` in tool regexes become invalid JSON
+// (`400 unmarshal anthropic request: invalid escape sequence`).
+func RedactBytes(body []byte) ([]byte, Result) {
 	if len(body) == 0 {
 		return body, Result{}
 	}
-	s, res := ScrubString(string(body))
-	if res.Len() == 0 {
-		return body, res
+	if json.Valid(body) {
+		out, res, err := redactJSON(body)
+		if err != nil || len(out) == 0 || !json.Valid(out) {
+			return body, Result{}
+		}
+		return out, res
 	}
+	s, res := RedactString(string(body))
 	return []byte(s), res
 }
 
-// ScrubChatRequest mutates message/tool text in place.
-func ScrubChatRequest(req *types.ChatRequest) Result {
+func redactJSON(body []byte) ([]byte, Result, error) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, Result{}, err
+	}
+	res := redactAny(&v)
+	out, err := json.Marshal(v)
+	return out, res, err
+}
+
+func skipJSONRedactKey(k string) bool {
+	switch strings.ToLower(strings.TrimSpace(k)) {
+	case "tools", "input_schema", "parameters", "function":
+		return true
+	default:
+		return false
+	}
+}
+
+func redactAny(v *any) Result {
+	if v == nil || *v == nil {
+		return Result{}
+	}
+	switch t := (*v).(type) {
+	case string:
+		s, r := RedactString(t)
+		*v = s
+		return r
+	case map[string]any:
+		// Anthropic tool_use / tool_result blocks carry cwd, argv, file
+		// bytes the local agent must execute unchanged.
+		if typ, _ := t["type"].(string); typ == "tool_use" || typ == "tool_result" {
+			return Result{}
+		}
+		merged := Result{}
+		for k, child := range t {
+			if skipJSONRedactKey(k) {
+				continue
+			}
+			c := child
+			merged = MergeResults(merged, redactAny(&c))
+			t[k] = c
+		}
+		return merged
+	case []any:
+		merged := Result{}
+		for i := range t {
+			merged = MergeResults(merged, redactAny(&t[i]))
+		}
+		return merged
+	default:
+		return Result{}
+	}
+}
+
+// RedactChatRequest mutates message/tool text in place.
+func RedactChatRequest(req *types.ChatRequest) Result {
 	if req == nil {
 		return Result{}
 	}
@@ -891,32 +951,14 @@ func ScrubChatRequest(req *types.ChatRequest) Result {
 	for i := range req.Messages {
 		m := &req.Messages[i]
 		if m.Content != "" {
-			s, r := ScrubString(m.Content)
+			s, r := RedactString(m.Content)
 			m.Content = s
 			add(r)
 		}
-		for j := range m.ToolCalls {
-			tc := &m.ToolCalls[j]
-			if tc.Arguments != "" {
-				s, r := ScrubString(tc.Arguments)
-				tc.Arguments = s
-				add(r)
-			}
-		}
+		// ToolCalls.Arguments are paths/argv the client will re-send
+		// and execute — do not rewrite.
 	}
-	for i := range req.Tools {
-		t := &req.Tools[i]
-		if t.Description != "" {
-			s, r := ScrubString(t.Description)
-			t.Description = s
-			add(r)
-		}
-		if len(t.InputSchema) > 0 {
-			b, r := ScrubBytes(t.InputSchema)
-			t.InputSchema = b
-			add(r)
-		}
-	}
+	// tools[] schemas stay intact (regex `\s`, "address:", "secret:").
 	return merged
 }
 
@@ -941,7 +983,7 @@ func LogHits(r *http.Request, res Result, dialect string) {
 		Model:      "",
 		Input:      res.Summary(),
 		Output:     "blocked outbound leak · replaced with samples",
-		StopReason: "privacy_scrub",
+		StopReason: "privacy_redact",
 		Tools:      append([]string{"privacy"}, kinds...),
 		ToolStatus: "ok",
 		Redactions: kinds,
@@ -957,7 +999,7 @@ func truncate(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
-// MergeResults combines multiple scrub results.
+// MergeResults combines multiple redact results.
 func MergeResults(parts ...Result) Result {
 	out := Result{}
 	for _, p := range parts {

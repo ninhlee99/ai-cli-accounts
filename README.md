@@ -25,14 +25,15 @@
 ## ⚡ Tính Năng Cốt Lõi
 
 - 🔄 **Auto-Rotate Claude Accounts:** Tự động phát hiện và xoay vòng qua nhiều tài khoản Claude Pro / Max trước khi chạm rate limit (dựa vào header `anthropic-ratelimit-*`), tự động refresh token OAuth.
-- 🌐 **Local AI Gateway (`:8787`):** Cung cấp endpoint chuẩn OpenAI (`http://127.0.0.1:8787/v1`) tương thích với Cursor, Continue, Cline, LangChain, SDK Python, Node.js...
+- 🌐 **Local AI Gateway (`:8787`):** OpenAI (`/v1/chat/completions`, `/v1/models`) + Anthropic (`/v1/messages`) — Cursor, Continue, Cline, LangChain, Claude Code, SDK.
 - 🧰 **Tool Mid-Layer (`pkg/tools`):** Chuyển đổi tool schema / tool_call giữa Claude Code, Cursor, Codex, Antigravity (Gemini) — Claude Code vẫn nhận `tool_use` và tự thực thi tool local.
-- 🛡️ **Multi-Provider Failover:** Tự động chuyển mạch dự phòng tức thì khi gặp lỗi 429 giữa các nhà cung cấp (GitHub Models, Gemini API, Groq, DuckDuckGo, Web Sessions) với cơ chế cooldown 30 phút.
-- 🔀 **Pool off/on + `X-Provider`:** `am accounts off|on` đưa account ra/vào rotate; vẫn gọi trực tiếp bằng header `X-Provider` / `X-Model`.
-- 🧠 **Context & Session Retention:** Giữ nguyên lịch sử hội thoại khi chuyển đổi tài khoản hoặc failover giữa các provider.
-- 📊 **Token Usage Analytics:** Đo lường chi tiết lượng token theo ngày, project, model và session kết nối.
-- 🧼 **Privacy scrub (`pkg/privacy`):** Redact email / API key / webhook / card… trên payload outbound trước khi lên upstream.
-- 🔐 **Bảo Mật Cao:** Tích hợp macOS Keychain và mã hóa AES-256-GCM / Scrypt để bảo vệ thông tin đăng nhập và token.
+- 🛡️ **Multi-Provider Failover:** Tự động chuyển mạch khi 429 / lỗi auth giữa GitHub Models, Gemini API, Groq, OpenRouter, Codex CLI và Web Sessions (ChatGPT / Claude / Gemini) — cooldown 30 phút.
+- 🔀 **Pool + `X-Provider`:** `am off` / `am pool remove` đưa **mọi** account ra rotate; `am on` / `am pool add` đưa vào. `X-Provider` pin thẳng 1 id.
+- 🧠 **Context & Session Retention:** Giữ lịch sử hội thoại khi đổi tài khoản hoặc failover provider.
+- 📊 **Token Usage Analytics:** Token theo ngày / tuần / tháng, project, model, session.
+- 🧼 **Privacy redact (`pkg/privacy`):** Che email / API key / webhook / card… trên payload outbound trước khi lên upstream.
+- 🔐 **Bảo mật:** macOS Keychain (OAuth + master key), `accounts.json` mã hóa AES-256-GCM (`AMENC1:`), bundle export/import Scrypt. Bind `--public` bắt API key ephemeral `amux-<auth-token>` (`am proxy token`).
+- 🔁 **Env sync khi proxy up/down:** đồng bộ `~/.claude/settings.json` `env`, `launchctl`, và `eval "$(am env)"` (`unset` khi down → fallback `api.anthropic.com`).
 
 ---
 
@@ -42,14 +43,15 @@
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ninhlee99/amux/main/install.sh | sh
 ```
-> *Yêu cầu: macOS, Go 1.22+ và Git. Script sẽ cài đặt song song cả 2 lệnh alias **`amux`** và **`am`** vào `/usr/local/bin` (bạn gõ lệnh nào cũng được).*
+> *Yêu cầu: **macOS**, **Go 1.26+**, Git. Script build từ source, cài song song alias **`amux`** và **`am`** vào `~/.local/bin` (ưu tiên nếu nằm trong `PATH`) hoặc `/usr/local/bin`, rồi chạy `am setup` (hook + `/am:feedback`).*
 
 ### 2. Sử dụng ngay với Claude Code:
-1. Mở terminal và chạy `claude` — tài khoản hiện tại sẽ được tự động snapshot vào hệ thống.
-2. Để thêm tài khoản mới: gõ `/login` trong Claude Code, sau đó mở một tab terminal mới — hệ thống sẽ tự phát hiện và thêm tài khoản vào danh sách xoay vòng.
+1. Mở `claude` — hook `SessionStart` chạy `am proxy up`. Proxy snapshot tài khoản Claude đang login vào `~/.am/` (cũng có thể `am add` thủ công).
+2. Thêm tài khoản: trong Claude Code gõ `/login`, xong `am add` (hoặc mở tab mới — proxy nhận login mới rồi snapshot).
+3. Thêm provider pool: `am login chatgpt|claude|gemini|gemini-web|github|groq` hoặc `am api add`.
 
-* **Tự động cập nhật:** `am setup --auto-update` (tự động kiểm tra và nâng cấp khi có bản mới)
-* **Nâng cấp thủ công:** `am update` (hoặc chạy lại lệnh cài đặt bên trên).
+* **Tự động cập nhật:** `am setup --auto-update` (LaunchAgent, kiểm tra định kỳ).
+* **Nâng cấp thủ công:** `am update` (hoặc `--force` để build lại; giữ nguyên `~/.am/`).
 * **Gỡ cài đặt:** `am hook uninstall && rm -f /usr/local/bin/am /usr/local/bin/amux ~/.local/bin/am ~/.local/bin/amux`
 
 ---
@@ -58,49 +60,82 @@ curl -fsSL https://raw.githubusercontent.com/ninhlee99/amux/main/install.sh | sh
 
 > 💡 **Mẹo:** Bạn có thể dùng `amux` hoặc `am` thay thế cho nhau (ví dụ: `amux sw` tương đương `am sw`).
 
-### Quản Lý Tài Khoản & Profile
+### Tài khoản
 | Lệnh | Mô Tả |
 | :--- | :--- |
-| `am ls` | Liệt kê các profile, email và trạng thái đang active |
-| `am sw` / `am sw <tên>` | Menu mũi tên tương tác đổi profile hoặc provider |
-| `am add [tên]` | Lưu tài khoản CLI hiện tại thành một profile mới |
-| `am current` | Kiểm tra tài khoản đang đăng nhập trên hệ thống |
-| `am rename <cũ> <mới>` | Đổi tên profile |
-| `am rm <tên>` / `am restore <tên>` | Xoá profile vào thùng rác / Khôi phục lại |
+| `am accounts` | List **mọi** account: Claude + web + API (`POOL=IN/OUT`) |
+| `am off <id>` / `am on <id>` | Ra/vào rotate — Claude, web, API (vẫn nằm `am accounts`) |
+| `am add [tool] [tên]` | Lưu login CLI hiện tại (`claude` / `codex` / `gemini`) |
+| `am rm` / `am restore` | Xoá profile Claude vào thùng rác / khôi phục |
+| `am rename <cũ> <mới>` | Đổi tên profile Claude |
+| `am sw` / `am sw <id>` | Picker hoặc pin Claude / provider |
+| `am ls [tool]` | Chỉ profile CLI (short ID) |
+| `am current [tool]` | Ai đang login trên máy |
 
-### Gateway & AI Provider
+### Rotate pool
 | Lệnh | Mô Tả |
 | :--- | :--- |
-| `am accounts` | Xem danh sách AI Provider trong pool và độ ưu tiên |
-| `am accounts off\|on <id>` / `am off\|on <id>` | Ra/vào rotate pool (vẫn gọi được qua `X-Provider`) |
-| `am login [provider]` | Đăng nhập tương tác Web/API (`chatgpt`, `claude`, `gemini`, `github`, `groq`) |
-| `am api add <tên> --endpoint <url> --api-key <key>` | Thêm endpoint chuẩn OpenAI tùy chỉnh vào pool |
-| `am api rm <tên>` / `am api ls` | Xoá hoặc xem danh sách provider API tùy chỉnh |
-| `am chat [nội dung]` | REPL chat trực tiếp trên terminal với cơ chế auto-failover |
+| `am pool` | Ai đang **IN** rotate |
+| `am pool add <id>` | Vào rotate (giống `am on`) |
+| `am pool remove <id>` | Ra rotate, **không** xoá list (giống `am off`) |
+| `am pool priority <id> <N>` / `am pool model <id> <model>` | Priority / model — hot-reload |
+| `am login <provider>` | `chatgpt`, `claude`, `gemini`, `gemini-web`, `github`, `groq` |
+| `am api add <tên> --endpoint <url> --api-key <key>` | Thêm OpenAI-compatible |
+| `am accounts rm <id>` | Xoá provider khỏi **list** (khác `pool remove`) |
+| `am doctor providers` | Probe 1 lượt |
+| `am chat [--provider <id>]` | REPL + failover |
+
+Alias cũ: `am accounts off\|on` = `am pool remove\|add`.
+
+> **Codex:** sau `am add codex`, token ChatGPT subscription được tái sử dụng thành adapter `codex:NN` (`type: codex_cli`) — không cần `am login` riêng.
 
 ### Giám Sát & Tiện Ích
 | Lệnh | Mô Tả |
 | :--- | :--- |
-| `am setup [--auto-update]` | Cài đặt Claude hook, slash command & kích hoạt tự động cập nhật |
-| `am update` | Nâng cấp amux lên bản mới nhất từ GitHub (giữ nguyên toàn bộ tài khoản) |
-| `am status` | Xem trạng thái proxy daemon, auto-update, các tab kết nối và quota |
-| `am watch` | Dashboard TUI: Dash · Accounts (nhóm) · Activity · Usage |
-| `am usage [day\|week\|month]` | Thống kê số lượng token sử dụng (thêm `-D` để xem chi tiết) |
-| `am proxy [up\|down]` | Khởi động hoặc dừng proxy daemon chạy nền |
-| `am env` | Xuất biến môi trường trỏ vào proxy (`eval "$(am env)"`) |
-| `am hook [install\|uninstall]` | Cài đặt hoặc gỡ bỏ Claude Code hook |
+| `am setup [--auto-update]` | Hook Claude + slash `/am:feedback` + (tuỳ chọn) auto-update |
+| `am update [--force] [--quiet]` | Nâng cấp từ GitHub `main` (giữ `~/.am/`) |
+| `am status` | Proxy, quota 5h/7d, pool, số tab |
+| `am watch` | Dashboard TUI: Dash · Accounts · Activity · Usage |
+| `am usage [day\|week\|month\|all]` | Token (`-D` chi tiết, `-d YYYY-MM-DD`, `-p PROJECT`) |
+| `am proxy [up\|down\|token]` | Daemon `:8787`. `--public` bind `0.0.0.0`; `-p/--port`; `--threshold N` (mặc định 95). `token` in admin token |
+| `am run claude` | Chạy `claude` đã gắn proxy |
+| `am env [--public]` | `eval "$(am env)"` — up: export gateway; down: `unset`. `--public` dùng LAN IP. `am env set\|get\|rm\|list` |
+| `am hook [install\|uninstall\|status]` | Claude Code hook |
+| `am export` / `am import` | Bundle profile mã hóa (`.amexp`) sang máy khác |
+| `am feedback` | Mở issue GitHub (`/am:feedback` trong Claude Code) |
 
 ---
 
 ## 🔌 Local AI Gateway (`http://127.0.0.1:8787`)
 
-Cổng proxy cục bộ hoạt động như một OpenAI-compatible API Gateway với khả năng tự động chuyển mạch (Failover):
+Cổng proxy cục bộ: OpenAI-compatible (`/v1/chat/completions`, `/v1/models`) + Anthropic (`/v1/messages`) với failover.
+
+Loopback (`127.0.0.1`) **không** bắt token (chấp nhận dummy key/sample key bất kỳ). Khi bind `--public` (hoặc mở IP ra bên ngoài), proxy tự động phát hành API Key dạng `amux-<auth-token>` (tương tự Antigravity). Client kết nối qua IP public **bắt buộc** phải sử dụng key này (`X-Api-Key`, `Authorization: Bearer <key>`, hoặc `X-Am-Token`), không được dùng key mẫu/dummy. Key này là ephemeral — mỗi lần bật/tắt proxy public sẽ tự động tạo một key mới. Lấy key bằng lệnh `am proxy token`.
+
+### Claude Code
+```sh
+am proxy up
+eval "$(am env)"    # ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN=am-proxy
+claude              # hoặc: am run claude
+```
 
 ### Cursor / Continue / Cline / LangChain
-Điền cấu hình trong phần cài đặt hoặc file môi trường:
 ```env
 OPENAI_BASE_URL="http://127.0.0.1:8787/v1"
-OPENAI_API_KEY="amux"
+OPENAI_API_KEY="am-proxy"
+```
+
+### Antigravity / Gemini CLI / Google Gen AI SDK
+```env
+GEMINI_API_BASE="http://127.0.0.1:8787"
+GOOGLE_GENAI_BASE_URL="http://127.0.0.1:8787"
+```
+
+Ép 1 provider / model (không đi rotate):
+
+```http
+X-Provider: gemini:api:01
+X-Model: gemini-3.6-flash
 ```
 
 ### Python SDK
@@ -109,7 +144,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="http://127.0.0.1:8787/v1",
-    api_key="amux"
+    api_key="am-proxy",
 )
 
 # Hỗ trợ đầy đủ SSE Streaming
@@ -127,7 +162,7 @@ for chunk in stream:
 
 ## 🧰 Luồng Claude Code ↔ Proxy ↔ Tools
 
-Claude Code **không** chạy tool trên server amux. Client sở hữu Bash/Read/Edit…; proxy chỉ cần trả đúng khối `tool_use` (Anthropic) hoặc `tool_calls` (OpenAI) để agent loop tiếp tục.
+Claude Code, Cursor, Antigravity **không** chạy tool trên server amux. Client sở hữu Bash/Read/Edit…; proxy chỉ cần trả đúng khối `tool_use` (Anthropic), `tool_calls` (OpenAI), hoặc `functionCall` (Gemini) để agent loop tiếp tục.
 
 ### Ai nói ngôn ngữ nào?
 
@@ -135,7 +170,7 @@ Claude Code **không** chạy tool trên server amux. Client sở hữu Bash/Rea
 | :--- | :--- | :--- |
 | **Claude Code** | `POST /v1/messages` | Anthropic `tools[]` + `tool_use` / `tool_result` |
 | **Cursor / Codex** | `POST /v1/chat/completions` | OpenAI `tools[].function` + `tool_calls` |
-| **Antigravity** (Gemini-shaped) | qua converter | Gemini `functionDeclarations` / `functionCall` |
+| **Antigravity** (Google GenAI) | `POST /v1beta/models/...:generateContent` & `:streamGenerateContent` | Gemini `functionDeclarations` / `functionCall` |
 
 Lớp giữa `pkg/tools` (`claude.go` / `cursor.go` / `codex.go` / `gemini.go`) chuẩn hoá mọi thứ về `types.ChatRequest`, rồi adapter pool nói đúng format upstream. Helper chung nằm ở `pkg/utils`.
 
@@ -193,13 +228,16 @@ Hook SessionStart/End (`am hook install`) cũng bật/tắt proxy khi mở tab C
 
 Khi `am proxy down` tắt hẳn daemon, cả 3 nơi trên đều được dọn sạch (`unset`, không chỉ "omit") — phiên Claude Code mới mở sau đó tự rơi về `api.anthropic.com` bằng subscription/API key sẵn có, không bị kẹt trỏ vào cổng proxy đã chết. **Lưu ý:** một session đang chạy dở từ trước khi đổi trạng thái proxy sẽ không tự thấy thay đổi (giới hạn vốn có của mọi set-env-at-start) — cần mở phiên mới hoặc `eval "$(am env)"` lại trong session đó.
 
-**Thứ tự ưu tiên khi proxy đang bật:** nếu account Claude subscription hiện tại còn dùng được (chưa bị `am accounts off`, chưa hết rate-limit), proxy ưu tiên reverse-proxy thẳng request Claude Code tới Anthropic bằng chính subscription đó — pool (`chatgpt`, `claude:web`, `gemini:web`, …) chỉ được dùng làm **failover** khi mọi account Claude không dùng được, hoặc khi ép rõ bằng `X-Provider`/`am sw <provider>`. Một account đã `am accounts off` không bao giờ được chọn — dù qua auto-rotate hay `X-Provider` trỏ thẳng ID.
+**Thứ tự ưu tiên khi proxy đang bật:** account Claude subscription còn dùng được (`am off` chưa tắt, chưa hết rate-limit) → reverse-proxy thẳng Anthropic. Pool (`chatgpt`, `claude:web`, `gemini:web`, …) chỉ **failover** khi mọi Claude profile không dùng được, hoặc khi ép `X-Provider` / `am sw <provider>`.
+
+- `am off <profile>` — profile Claude: skip rotate, chặn `am sw` **và** `X-Provider` (không bypass subscription đã tắt).
+- `am accounts off <id>` — provider pool: ra khỏi failover rotate; **vẫn** gọi được bằng `X-Provider` / `X-Model`.
 
 ### Cursor / Codex (cùng mid-layer)
 
 ```env
 OPENAI_BASE_URL="http://127.0.0.1:8787/v1"
-OPENAI_API_KEY="amux"
+OPENAI_API_KEY="am-proxy"
 ```
 
 Cursor/Codex gửi OpenAI `tools` → `pkg/tools` → pool → trả `tool_calls` đúng dialect. Agent loop vẫn chạy phía client.
@@ -242,17 +280,19 @@ X-Provider: <account-id>
 X-Model: <model>
 ```
 
-Không header → hành vi cũ. Restart proxy sau khi đổi pool: `am proxy down && am proxy up`.
+Không header → rotate pool. `am accounts off|on|priority|model` và `am off|on` **hot-reload** qua `/_am/sync` — không cần restart daemon.
 
-Log: `~/.am/events.log`, `~/.am/requests.log`.
+Log: `~/.am/events.log`, `~/.am/requests.log`. Dữ liệu hồ sơ / pool: `~/.am/` (giữ nguyên khi `am update`).
 
 ---
 
 ## ⚙️ Cấu Hình Provider Pool (`~/.am/accounts.json`)
 
-Hệ thống ưu tiên gọi các provider theo số thứ tự `priority` từ nhỏ đến lớn. Hỗ trợ bí danh `env:TEN_BIEN` để đọc key từ môi trường:
+Ưu tiên theo `priority` (số nhỏ thử trước). Key có thể là `env:TEN_BIEN`.
 
-ID thống nhất `brand[:method]:NN` (vd. `github:api:01`, `gemini:api:01`, `claude:web:01`). Legacy ID tự migrate khi chạy.
+ID: `brand[:method]:NN` (vd. `github:api:01`, `gemini:api:01`, `claude:web:01`). Legacy ID tự migrate khi chạy `am`.
+
+**Không sửa `~/.am/accounts.json` bằng tay** — file trên đĩa được mã hóa AES-256-GCM (magic `AMENC1:`, master key trong Keychain). Thêm/sửa bằng `am login`, `am api add`, `am accounts priority|model|off|on|rm`. Schema plaintext nằm ở [`accounts.example.json`](accounts.example.json):
 
 ```json
 {
@@ -280,16 +320,21 @@ ID thống nhất `brand[:method]:NN` (vd. `github:api:01`, `gemini:api:01`, `cl
       "baseUrl": "https://api.groq.com/openai/v1",
       "apiKey": "env:GROQ_API_KEY",
       "model": "llama-3.3-70b-versatile"
-    },
-    {
-      "id": "duckduckgo:01",
-      "type": "duckduckgo",
-      "priority": 4,
-      "model": "claude-3-haiku-20240307"
     }
   ]
 }
 ```
+
+### Bind LAN (`--public`)
+
+```sh
+am proxy up --public            # 0.0.0.0:<port>
+am proxy up --public -p 9000
+am proxy token                  # Bearer / X-Am-Token cho máy khác
+eval "$(am env --public)"       # BASE_URL = LAN IP
+```
+
+Loopback vẫn không cần token. `/_am/status` trên localhost luôn mở.
 
 ---
 

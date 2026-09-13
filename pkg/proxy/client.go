@@ -172,8 +172,12 @@ func CmdProxyUpFlags(f UpFlags) {
 	}
 
 	if IsPublic() || IsPublicBind(listen) {
+		tok, _ := LoadAuthToken()
 		fmt.Printf("amux proxy up  bind %s  local %s\n", listen, ProxyBase())
-		fmt.Printf("  public  %s\n", FormatPublicHosts())
+		fmt.Printf("  public   %s\n", FormatPublicHosts())
+		if tok != "" {
+			fmt.Printf("  api-key  %s\n", tok)
+		}
 	} else if f.Restart || needSpawn {
 		fmt.Printf("amux proxy up  bind %s  %s\n", listen, ProxyBase())
 	}
@@ -228,6 +232,7 @@ func CmdProxyDown(force, yesIKnow bool) {
 			}
 		}
 		postAndClose(ProxyBase() + "/_am/shutdown")
+		_ = ClearAuthToken()
 		hook.SyncLaunchctlEnv(false, "")
 		if err := hook.SyncClaudeSettingsEnv(false, ""); err != nil {
 			fmt.Fprintf(os.Stderr, "amux: sync claude settings env: %v\n", err)
@@ -242,6 +247,7 @@ func CmdProxyDown(force, yesIKnow bool) {
 		return
 	}
 	postAndClose(ProxyBase() + "/_am/shutdown")
+	_ = ClearAuthToken()
 	hook.SyncLaunchctlEnv(false, "")
 	if err := hook.SyncClaudeSettingsEnv(false, ""); err != nil {
 		fmt.Fprintf(os.Stderr, "amux: sync claude settings env: %v\n", err)

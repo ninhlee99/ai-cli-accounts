@@ -29,9 +29,11 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request, pool *router.
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
 	}
-	if scrubbed, res := privacy.ScrubBytes(body); res.Len() > 0 {
-		body = scrubbed
-		privacy.LogHits(r, res, "openai")
+	if privacy.Enabled {
+		if redacted, res := privacy.RedactBytes(body); res.Len() > 0 {
+			body = redacted
+			privacy.LogHits(r, res, "openai")
+		}
 	}
 
 	req, err := openAIBodyToChatRequest(body)
@@ -51,7 +53,7 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request, pool *router.
 
 	cmplID := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
 	now := time.Now().Unix()
-	inputTokens := len(req.Messages) * 10
+	inputTokens := estimateInputTokens(req)
 
 	if req.Stream {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -66,6 +68,7 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request, pool *router.
 
 		var fullContent strings.Builder
 		var toolCalls []types.ToolCall
+		var logText string
 		finishReason := "stop"
 		stopSent := false
 		for chunk := range stream {
@@ -81,6 +84,26 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request, pool *router.
 				return
 			}
 
+			if chunk.LogText != "" {
+				logText = chunk.LogText
+			}
+			if chunk.Thinking != "" {
+				chunkJSON, _ := json.Marshal(map[string]any{
+					"id":      cmplID,
+					"object":  "chat.completion.chunk",
+					"created": now,
+					"model":   req.Model,
+					"choices": []map[string]any{{
+						"index": 0,
+						"delta": map[string]string{
+							"reasoning_content": chunk.Thinking,
+						},
+						"finish_reason": nil,
+					}},
+				})
+				fmt.Fprintf(w, "data: %s\n\n", chunkJSON)
+				flusher.Flush()
+			}
 			if chunk.Content != "" {
 				fullContent.WriteString(chunk.Content)
 				chunkJSON, _ := json.Marshal(map[string]any{
@@ -100,7 +123,7 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request, pool *router.
 				flusher.Flush()
 			}
 			if len(chunk.ToolCalls) > 0 {
-				toolCalls = chunk.ToolCalls
+				toolCalls = append(toolCalls, chunk.ToolCalls...)
 			}
 			if chunk.FinishReason != "" {
 				finishReason = chunk.FinishReason
@@ -172,24 +195,32 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request, pool *router.
 
 		fmt.Fprintf(w, "data: [DONE]\n\n")
 		flusher.Flush()
-		outTok := len(fullContent.String()) / 4
+		outTok := estimateStringTokens(fullContent.String())
 		recordChatUsage(r, pool, req.Model, inputTokens, outTok)
-		logChatRequest(r, pool, req, fullContent.String(), finishReason, "", inputTokens, outTok, started, toolCalls)
+		logChatRequest(r, pool, req, pickLogOutput(fullContent.String(), logText), finishReason, "", inputTokens, outTok, started, toolCalls)
 		return
 	}
 
 	// Non-streaming
 	var full strings.Builder
+	var thinking strings.Builder
 	var toolCalls []types.ToolCall
+	var logText string
 	finishReason := "stop"
 	for chunk := range stream {
 		if chunk.Error != nil {
 			http.Error(w, chunk.Error.Error(), http.StatusBadGateway)
 			return
 		}
+		if chunk.Thinking != "" {
+			thinking.WriteString(chunk.Thinking)
+		}
 		full.WriteString(chunk.Content)
+		if chunk.LogText != "" {
+			logText = chunk.LogText
+		}
 		if len(chunk.ToolCalls) > 0 {
-			toolCalls = chunk.ToolCalls
+			toolCalls = append(toolCalls, chunk.ToolCalls...)
 		}
 		if chunk.FinishReason != "" {
 			finishReason = chunk.FinishReason
@@ -202,10 +233,13 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request, pool *router.
 		finishReason = "tool_calls"
 	}
 
-	completionTokens := len(full.String()) / 4
+	completionTokens := estimateStringTokens(full.String()) + estimateStringTokens(thinking.String())
 	msg := map[string]any{
 		"role":    "assistant",
 		"content": full.String(),
+	}
+	if thinking.Len() > 0 {
+		msg["reasoning_content"] = thinking.String()
 	}
 	if len(toolCalls) > 0 {
 		msg["tool_calls"] = tools.ToOpenAIToolCalls(toolCalls)
@@ -233,7 +267,7 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request, pool *router.
 	}
 	_ = json.NewEncoder(w).Encode(resp)
 	recordChatUsage(r, pool, req.Model, inputTokens, completionTokens)
-	logChatRequest(r, pool, req, full.String(), finishReason, "", inputTokens, completionTokens, started, toolCalls)
+	logChatRequest(r, pool, req, pickLogOutput(full.String(), logText), finishReason, "", inputTokens, completionTokens, started, toolCalls)
 }
 
 // openAIBodyToChatRequest parses a Cursor/Codex OpenAI chat.completions body

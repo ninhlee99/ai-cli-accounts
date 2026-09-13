@@ -2,6 +2,7 @@ package ui
 
 import (
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
@@ -28,7 +29,8 @@ var (
 	appStyle = lipgloss.NewStyle()
 
 	headerBar = lipgloss.NewStyle().
-			Padding(0, 2)
+			Padding(0, 2).
+			MaxHeight(1)
 
 	brandStyle = lipgloss.NewStyle().
 			Foreground(colCyan).
@@ -49,7 +51,8 @@ var (
 
 	footerBar = lipgloss.NewStyle().
 			Foreground(colTextDim).
-			Padding(0, 2)
+			Padding(0, 2).
+			MaxHeight(1)
 
 	keyStyle = lipgloss.NewStyle().
 			Foreground(colTextHi).
@@ -79,13 +82,64 @@ var (
 )
 
 func watchPanel(title string, width, height int, accent lipgloss.Color, body string) string {
+	width = maxInt(width, 8)
+	height = maxInt(height, 3)
+	innerW := maxInt(width-4, 4)
+	innerH := maxInt(height-3, 1) // border 2 + title 1
+	body = clipText(body, innerW, innerH)
 	style := panelBase.
-		Width(maxInt(width-2, 10)).
-		Height(maxInt(height-2, 3)).
+		Width(width - 2).
+		Height(height - 2).
+		MaxWidth(width).
+		MaxHeight(height).
 		BorderForeground(accent)
-	titled := panelTitleStyle.Foreground(accent).Render(title)
+	titled := panelTitleStyle.Foreground(accent).MaxWidth(innerW).Render(title)
 	inner := lipgloss.JoinVertical(lipgloss.Left, titled, body)
 	return style.Render(inner)
+}
+
+func watchPanelBottom(title string, width, height int, accent lipgloss.Color, body string) string {
+	width = maxInt(width, 8)
+	height = maxInt(height, 3)
+	innerW := maxInt(width-4, 4)
+	innerH := maxInt(height-3, 1)
+	body = clipTextBottom(body, innerW, innerH)
+	style := panelBase.
+		Width(width - 2).
+		Height(height - 2).
+		MaxWidth(width).
+		MaxHeight(height).
+		BorderForeground(accent)
+	titled := panelTitleStyle.Foreground(accent).MaxWidth(innerW).Render(title)
+	inner := lipgloss.JoinVertical(lipgloss.Left, titled, body)
+	return style.Render(inner)
+}
+
+// clipText keeps s inside a w×h cell (ANSI-aware). Extra rows/cols drop from the bottom.
+func clipText(s string, w, h int) string {
+	if w < 1 {
+		w = 1
+	}
+	if h < 1 {
+		h = 1
+	}
+	return lipgloss.NewStyle().MaxWidth(w).MaxHeight(h).Render(s)
+}
+
+// clipTextBottom keeps the last h rows (drop oldest). No top pad.
+func clipTextBottom(s string, w, h int) string {
+	if w < 1 {
+		w = 1
+	}
+	if h < 1 {
+		h = 1
+	}
+	wrapped := lipgloss.NewStyle().Width(w).MaxWidth(w).Render(s)
+	lines := strings.Split(wrapped, "\n")
+	if len(lines) > h {
+		lines = lines[len(lines)-h:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func watchKV(label, val string) string {

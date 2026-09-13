@@ -1,13 +1,14 @@
 package privacy
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"amux-accounts/pkg/types"
 )
 
-func TestScrubString_ReplacesSecrets(t *testing.T) {
+func TestRedactString_ReplacesSecrets(t *testing.T) {
 	in := strings.Join([]string{
 		"mail me at alice@corp-secret.io please",
 		"key sk-ant-api03-REALSECRETVALUEHERE1234567890abcd",
@@ -20,13 +21,13 @@ func TestScrubString_ReplacesSecrets(t *testing.T) {
 		"password=SuperSecretValue99",
 	}, "\n")
 
-	out, res := ScrubString(in)
+	out, res := RedactString(in)
 	if res.Len() == 0 {
 		t.Fatal("expected redactions")
 	}
 	for _, bad := range []string{
 		"alice@corp-secret.io", "REALSECRETVALUEHERE", "abcdefghijklmnopqrstuvwxyz123456",
-		"eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9", "123-45-6789", "/Users/alice",
+		"eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9", "123-45-6789",
 		"alice:s3cret@db.internal", "SuperSecretValue99",
 	} {
 		if strings.Contains(out, bad) {
@@ -36,6 +37,9 @@ func TestScrubString_ReplacesSecrets(t *testing.T) {
 	if !strings.Contains(out, "sample@example.com") {
 		t.Fatalf("expected sample email, got: %s", out)
 	}
+	if !strings.Contains(out, "/Users/alice/secret/project") {
+		t.Fatalf("workspace path must stay for local tools, got: %s", out)
+	}
 	sum := res.Summary()
 	for _, bad := range []string{"alice@", "REALSECRET", "SuperSecret", "s3cret"} {
 		if strings.Contains(sum, bad) {
@@ -44,7 +48,7 @@ func TestScrubString_ReplacesSecrets(t *testing.T) {
 	}
 }
 
-func TestScrubString_ExpandedThreats(t *testing.T) {
+func TestRedactString_ExpandedThreats(t *testing.T) {
 	in := strings.Join([]string{
 		"CCCD: 079203001234 and CMND 123456789",
 		"MST 0312345678 passport B1234567",
@@ -75,7 +79,7 @@ func TestScrubString_ExpandedThreats(t *testing.T) {
 		"Basic YWxpY2U6c2VjcmV0cGFzcw==",
 	}, "\n")
 
-	out, res := ScrubString(in)
+	out, res := RedactString(in)
 	if res.Len() == 0 {
 		t.Fatal("expected redactions")
 	}
@@ -107,10 +111,10 @@ func TestScrubString_ExpandedThreats(t *testing.T) {
 	}
 }
 
-func TestScrubString_Idempotent(t *testing.T) {
+func TestRedactString_Idempotent(t *testing.T) {
 	in := "contact sample@example.com with sk-ant-api03-sample-redacted-key-000000"
-	out1, res1 := ScrubString(in)
-	out2, res2 := ScrubString(out1)
+	out1, res1 := RedactString(in)
+	out2, res2 := RedactString(out1)
 	if res1.Len() != 0 {
 		t.Fatalf("sample input should not redact, got %+v", res1)
 	}
@@ -122,13 +126,13 @@ func TestScrubString_Idempotent(t *testing.T) {
 	}
 }
 
-func TestScrubChatRequest(t *testing.T) {
+func TestRedactChatRequest(t *testing.T) {
 	req := &types.ChatRequest{
 		Messages: []types.ChatMessage{
 			{Role: "user", Content: "token ghp_abcdefghijklmnopqrstuvwx1234567890 and bob@evil.test"},
 		},
 	}
-	res := ScrubChatRequest(req)
+	res := RedactChatRequest(req)
 	if res.Len() == 0 {
 		t.Fatal("expected hits")
 	}
@@ -138,11 +142,14 @@ func TestScrubChatRequest(t *testing.T) {
 	}
 }
 
-func TestScrubBytes_JSONSafe(t *testing.T) {
+func TestRedactBytes_JSONSafe(t *testing.T) {
 	body := []byte(`{"messages":[{"role":"user","content":"hi alice@corp.io sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"}]}`)
-	out, res := ScrubBytes(body)
+	out, res := RedactBytes(body)
 	if res.Len() == 0 {
 		t.Fatal("expected hits")
+	}
+	if !json.Valid(out) {
+		t.Fatalf("redact produced invalid json: %s", out)
 	}
 	s := string(out)
 	if strings.Contains(s, "alice@corp.io") || strings.Contains(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") {
@@ -153,15 +160,103 @@ func TestScrubBytes_JSONSafe(t *testing.T) {
 	}
 }
 
+func TestRedactBytes_PreservesRegexEscape(t *testing.T) {
+	// Claude Code tool schemas often contain `\s`. Byte-level replace used
+	// to turn the JSON `\\s` into a lone `\s` → 400 unmarshal.
+	body := []byte(`{"model":"claude-sonnet","max_tokens":16,"messages":[{"role":"user","content":"split on \\s+ secret: hunter2xx Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturepadxx path /Users/alice/proj"}]}`)
+	if !json.Valid(body) {
+		t.Fatal("fixture must be valid json")
+	}
+	out, res := RedactBytes(body)
+	if res.Len() == 0 {
+		t.Fatal("expected hits")
+	}
+	if !json.Valid(out) {
+		t.Fatalf("invalid json after redact: %s", out)
+	}
+	var probe struct {
+		Messages []struct {
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &probe); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, out)
+	}
+	if len(probe.Messages) == 0 || !strings.Contains(probe.Messages[0].Content, `\s`) {
+		t.Fatalf("lost regex \\s in content: %q", probe.Messages)
+	}
+	if strings.Contains(probe.Messages[0].Content, "hunter2xx") {
+		t.Fatalf("secret leaked: %q", probe.Messages[0].Content)
+	}
+	if !strings.Contains(probe.Messages[0].Content, "/Users/alice/proj") {
+		t.Fatalf("cwd path must stay: %q", probe.Messages[0].Content)
+	}
+}
+
+func TestRedactBytes_LeavesToolsAndToolUse(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-sonnet",
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"read /Users/ninh.le/app/README.md alice@corp.io"}]},
+			{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"/Users/ninh.le/app/README.md"}}]}
+		],
+		"tools":[{"name":"Read","description":"email address: local file","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}]
+	}`)
+	if !json.Valid(body) {
+		t.Fatal("fixture")
+	}
+	out, _ := RedactBytes(body)
+	if !json.Valid(out) {
+		t.Fatalf("invalid json: %s", out)
+	}
+	s := string(out)
+	if !strings.Contains(s, "/Users/ninh.le/app/README.md") {
+		t.Fatalf("tool path rewritten: %s", s)
+	}
+	if !strings.Contains(s, `"name":"Read"`) || !strings.Contains(s, "email address: local file") {
+		t.Fatalf("tools[] mutated: %s", s)
+	}
+	if strings.Contains(s, "alice@corp.io") {
+		t.Fatalf("email in text should redact: %s", s)
+	}
+}
+
+func TestRedactChatRequest_LeavesTools(t *testing.T) {
+	req := &types.ChatRequest{
+		Messages: []types.ChatMessage{
+			{Role: "user", Content: "see bob@evil.test at /Users/ninh.le/x"},
+			{Role: "assistant", ToolCalls: []types.ToolCall{{Name: "Read", Arguments: `{"path":"/Users/ninh.le/x"}`}}},
+		},
+		Tools: []types.ToolDef{{
+			Name:        "Read",
+			Description: "secret: file path on disk",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		}},
+	}
+	res := RedactChatRequest(req)
+	if res.Len() == 0 {
+		t.Fatal("expected email hit in user text")
+	}
+	if !strings.Contains(req.Messages[0].Content, "/Users/ninh.le/x") {
+		t.Fatalf("cwd lost: %s", req.Messages[0].Content)
+	}
+	if req.Messages[1].ToolCalls[0].Arguments != `{"path":"/Users/ninh.le/x"}` {
+		t.Fatalf("tool args rewritten: %s", req.Messages[1].ToolCalls[0].Arguments)
+	}
+	if req.Tools[0].Description != "secret: file path on disk" {
+		t.Fatalf("tool desc rewritten: %s", req.Tools[0].Description)
+	}
+}
+
 func TestLuhnRejectsNonCards(t *testing.T) {
 	in := "order id 1234 5678 9012 3456 not a real card hopefully"
-	out, _ := ScrubString(in)
+	out, _ := RedactString(in)
 	if !strings.Contains(out, "1234") {
 		t.Log(out)
 	}
 }
 
-func TestScrubString_CodeSecrets(t *testing.T) {
+func TestRedactString_CodeSecrets(t *testing.T) {
 	// Build webhook-shaped strings at runtime so the source tree never contains
 	// a contiguous hooks.slack.com / discord webhook URL (push protection).
 	slackWH := "https://hooks.slack.com/services/" + "TEXAMPLE0" + "/" + "BEXAMPLE0" + "/" + "abcdefghijklmnopqrstuvwx"
@@ -190,7 +285,7 @@ func TestScrubString_CodeSecrets(t *testing.T) {
 		"password: " + strings.Repeat("YWxhZGRpbjpvcGVuc2VzYW1l", 2),
 	}, "\n")
 
-	out, res := ScrubString(in)
+	out, res := RedactString(in)
 	if res.Len() == 0 {
 		t.Fatal("expected code redactions")
 	}
@@ -220,8 +315,8 @@ func TestScrubString_CodeSecrets(t *testing.T) {
 }
 
 func TestPrivateIPPreserved(t *testing.T) {
-	in := "hit 10.0.0.5 and 127.0.0.1 but scrub 1.1.1.1"
-	out, _ := ScrubString(in)
+	in := "hit 10.0.0.5 and 127.0.0.1 but redact 1.1.1.1"
+	out, _ := RedactString(in)
 	if !strings.Contains(out, "10.0.0.5") || !strings.Contains(out, "127.0.0.1") {
 		t.Fatalf("private/loopback should stay: %s", out)
 	}

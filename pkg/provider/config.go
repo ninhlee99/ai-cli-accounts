@@ -321,12 +321,15 @@ func SetPriority(path, id string, priority int) error {
 // removed from rotate/failover pool; the account stays in accounts.json and
 // can still be selected via X-Provider / X-Model on API requests.
 func SetEnabled(path, id string, enabled bool) error {
+	if resolved, err := MatchID(path, id); err == nil {
+		id = resolved
+	}
 	f, err := LoadConfigFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	if f == nil {
-		return fmt.Errorf("no provider with id %q in pool (see: am accounts)", id)
+		return fmt.Errorf("no provider with id %q (see: am accounts)", id)
 	}
 	for i, p := range f.Providers {
 		if p.ID == id {

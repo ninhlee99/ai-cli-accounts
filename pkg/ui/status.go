@@ -231,18 +231,19 @@ func printPoolDetail(s *proxyStatus) {
 			badge = term.Badge("ok", "live")
 		}
 
-		term.Row(fmt.Sprintf("%s  %s  %s",
+		line := fmt.Sprintf("%s  %s  %s",
 			badge,
 			term.Dim(fmt.Sprintf("p%-2.0f", prio)),
 			term.Bold(types.DisplayAccountID(id)),
-		))
+		)
 		if cooling {
 			if cdUntil, ok := p["cooldown_until"].(string); ok && cdUntil != "" {
 				if t, e := time.Parse(time.RFC3339, cdUntil); e == nil {
-					term.Row("      " + term.Yellow("cooldown "+t.Local().Format("15:04")))
+					line += "  " + term.Yellow("cooldown "+t.Local().Format("15:04"))
 				}
 			}
 		}
+		term.Row(line)
 	}
 	term.PanelEnd()
 }

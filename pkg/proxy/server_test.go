@@ -235,7 +235,7 @@ func newHandlerWithRotator(t *testing.T, rot *Rotator, poolAdapters []types.Prov
 	return sw, nil
 }
 
-// Sole Claude Code account on cooldown → provider pool (API→web→DDG).
+// Sole Claude Code account on cooldown → provider pool (API→web).
 func TestHandler_SingleClaudeCoolingFailsOverToPool(t *testing.T) {
 	rot := &Rotator{
 		tool:           "claude",
@@ -262,7 +262,7 @@ func TestHandler_SingleClaudeCoolingFailsOverToPool(t *testing.T) {
 	}
 }
 
-// All Claude Code accounts on cooldown → provider pool (API→web→DDG).
+// All Claude Code accounts on cooldown → provider pool (API→web).
 func TestHandler_AllClaudeCoolingFailsOverToPool(t *testing.T) {
 	rot := &Rotator{
 		tool:   "claude",

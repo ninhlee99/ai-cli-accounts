@@ -1,6 +1,23 @@
 package ui
 
-import "time"
+import (
+	"time"
+
+	"amux-accounts/pkg/types"
+)
+
+// isPrivacyRedact reports a privacy-redact log row. Accepts the old
+// "privacy_scrub" stop reason so historical ~/.am/requests.log still shows.
+func isPrivacyRedact(r types.RequestEntry) bool {
+	if len(r.Redactions) > 0 {
+		return true
+	}
+	switch r.StopReason {
+	case "privacy_redact", "privacy_scrub":
+		return true
+	}
+	return len(r.Tools) > 0 && r.Tools[0] == "privacy"
+}
 
 type watchTab int
 

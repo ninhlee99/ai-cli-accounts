@@ -43,7 +43,6 @@ amux/
     │   ├── gemini.go / gemini_web.go
     │   ├── chatgpt_web.go / claude_web.go
     │   ├── codex_cli.go            # Codex CLI token reuse
-    │   ├── duckduckgo.go           # Free fallback
     │   └── prompt.go / stream.go   # Context concat + SSE helpers
     │
     ├── browser/                    # Cookie / CDP login helpers
@@ -57,11 +56,12 @@ amux/
     ├── bridge/                     # [BRIDGE] Protocol convert + routing headers
     │   ├── openai.go               # /v1/chat/completions + /v1/models
     │   ├── claude.go               # /v1/messages ↔ canonical
+    │   ├── gemini.go               # /v1beta/models/... (Antigravity & Gemini native)
     │   ├── headers.go              # X-Provider / X-Model → poolSend
     │   └── requestlog.go           # Request I/O log (privacy-aware)
     │
-    ├── privacy/                    # [PRIVACY] Scrub secrets outbound
-    │   └── scrub.go                # Email, keys, webhooks, cards… → redacted
+    ├── privacy/                    # [PRIVACY] Redact secrets outbound
+    │   └── redact.go               # Email, keys, webhooks, cards… → samples
     │
     ├── tools/                      # [MID-LAYER] Tool dialect convert
     │   ├── dialect.go              # Canonical tool types
@@ -125,7 +125,7 @@ amux/
 | `pkg/browser` | Infra | Cookie decrypt + CDP login. |
 | `pkg/router` | Router | Priority failover, cooldown 429, explicit provider by ID. |
 | `pkg/bridge` | Bridge | Anthropic ↔ OpenAI; `X-Provider`/`X-Model`; request log. |
-| `pkg/privacy` | Privacy | Scrub secrets trên payload trước upstream. |
+| `pkg/privacy` | Privacy | Redact secrets trên payload trước upstream. |
 | `pkg/tools` | Mid-layer | Tool schema / tool_call dialect (Claude, Cursor, Codex, Gemini). |
 | `pkg/utils` | Shared | JSON schema helpers cho tools. |
 | `pkg/proxy` | Gateway | Daemon `:8787`, rotator, supervisor, Anthropic passthrough. |
@@ -153,7 +153,7 @@ sequenceDiagram
 
     App->>Proxy: POST /v1/chat/completions<br/>(optional X-Provider / X-Model)
     Proxy->>Bridge: HandleChatCompletions
-    Bridge->>Bridge: Scrub outbound secrets
+        Bridge->>Bridge: Redact outbound secrets
     alt Có X-Provider
         Bridge->>Router: Send via LookupAdapter(id)
     else Rotate pool
@@ -182,7 +182,7 @@ flowchart TD
 
     ModeCheck -->|"provider / hết quota"| Bridge["bridge.HandleClaudeMessages"]
     Bridge --> Tools["pkg/tools dialect convert"]
-    Tools --> Privacy["pkg/privacy scrub"]
+    Tools --> Privacy["pkg/privacy redact"]
     Privacy --> Router["AccountPoolRouter / X-Provider"]
     Router --> Providers["Pool adapters"]
     Providers -->|"SSE tool_use Anthropic"| Claude
@@ -203,5 +203,5 @@ flowchart TD
 2. **Stateless session retention:** Provider mới phải dùng `BuildConcatenatedPrompt` (hoặc tương đương) khi failover.
 3. **Graceful failover:** 429 / auth lỗi → `ErrRateLimitReached` / `ErrAuthentication`.
 4. **Entrypoint đơn:** chỉ `main.go` → `cli.Run`.
-5. **Privacy first:** payload lên upstream đi qua scrub; test không chứa literal secret dạng webhook thật (tránh push protection).
+5. **Privacy first:** payload lên upstream đi qua redact; test không chứa literal secret dạng webhook thật (tránh push protection).
 6. **ID ổn định:** ID mới = `brand[:method]:NN`; thêm prefix qua `MigrateLegacyIDs`, không invent format song song.

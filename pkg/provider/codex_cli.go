@@ -44,6 +44,9 @@ const (
 func (a *CodexCLIAdapter) ID() string    { return a.AdapterID }
 func (a *CodexCLIAdapter) Priority() int { return a.PriorityLvl }
 
+// SupportsTools is false: Codex backend is a flattened text prompt.
+func (a *CodexCLIAdapter) SupportsTools() bool { return false }
+
 func (a *CodexCLIAdapter) client() *http.Client {
 	if a.HTTPClient != nil {
 		return a.HTTPClient

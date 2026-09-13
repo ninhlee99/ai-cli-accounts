@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"amux-accounts/pkg/browser"
+	"amux-accounts/pkg/profile"
 	"amux-accounts/pkg/provider"
 	"amux-accounts/pkg/proxy"
 	"amux-accounts/pkg/term"
@@ -498,7 +499,7 @@ func loginGroq(f loginFlags) {
 }
 
 // CmdDoctorProviders live-probes every pool adapter with a tiny chat turn and
-// prints OK/FAIL. Used to answer "does chatgpt/gemini/ddg/api actually work?".
+// prints OK/FAIL. Used to answer "does chatgpt/gemini/api actually work?".
 func CmdDoctorProviders() {
 	adapters, err := provider.LoadAccounts(provider.DefaultAccountsPath())
 	if err != nil {
@@ -548,77 +549,118 @@ func CmdDoctorProviders() {
 	}
 }
 
-// CmdAccounts lists all multi-provider pool accounts, sorted by priority
-// (the order the router actually tries them in).
-func CmdAccounts() {
+func providerKindLabel(typ string) string {
+	switch typ {
+	case "chatgpt_web":
+		return "chatgpt-web"
+	case "claude_web":
+		return "claude-web"
+	case "gemini_web":
+		return "gemini-web"
+	case "gemini":
+		return "gemini-api"
+	case "codex_cli":
+		return "codex"
+	case "openai_compatible":
+		return "api"
+	default:
+		if typ == "" {
+			return "api"
+		}
+		return typ
+	}
+}
+
+func poolMark(in bool) string {
+	if in {
+		return "IN"
+	}
+	return "OUT"
+}
+
+func loadProviderRows() []provider.ProviderConfig {
 	file, err := provider.LoadConfigFile(provider.DefaultAccountsPath())
 	var rows []provider.ProviderConfig
 	if err == nil && file != nil {
 		rows = append(rows, file.Providers...)
 	}
-
-	hasCodexRow := false
+	hasCodex := false
 	for _, p := range rows {
 		if p.Type == "codex_cli" {
-			hasCodexRow = true
+			hasCodex = true
 			break
 		}
 	}
-	if !hasCodexRow {
+	if !hasCodex {
 		if row, ok := provider.CodexAutoRow(rows); ok {
 			rows = append(rows, row)
 		}
 	}
-
-	if len(rows) == 0 {
-		term.Warn("No accounts in pool. Run `amux login <provider>` or edit ~/.am/accounts.json.")
-		return
-	}
-
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Priority < rows[j].Priority })
+	return rows
+}
 
-	term.Header("amux accounts", "provider pool · priority = try order")
+// CmdAccounts lists every saved account: Claude profiles + web/API providers.
+func CmdAccounts() {
+	term.Header("amux accounts", "all accounts · POOL=IN means rotate")
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, term.Dim("ID\tACCOUNT\tTYPE\tPRIORITY\tMODEL\tAUTH\tOFF"))
+	fmt.Fprintln(w, term.Dim("ID\tKIND\tACCOUNT\tPOOL\tMODEL"))
 
-	for _, p := range rows {
-		authSet := "No"
-		switch p.Type {
-		case "openai_compatible", "gemini":
-			if provider.ResolveSecret(p.APIKey) != "" {
-				authSet = "Yes (API Key)"
-			}
-		case "chatgpt_web":
-			if provider.ResolveSecret(p.SessionToken) != "" {
-				authSet = "Yes (Session Token)"
-			}
-		case "claude_web":
-			if provider.ResolveSecret(p.SessionKey) != "" {
-				authSet = "Yes (Session Key)"
-			}
-		case "gemini_web":
-			if provider.ResolveSecret(p.Cookies) != "" || strings.TrimSpace(p.Cookies) != "" {
-				authSet = "Yes (Cookies)"
-			}
-		case "codex_cli":
-			authSet = "Yes (reused from `am add codex`)"
+	n := 0
+	for _, p := range profile.ListProfiles("claude") {
+		acct := p.Account
+		if acct == "" {
+			acct = p.Name
 		}
-
-		off := ""
-		if p.Enabled != nil && !*p.Enabled {
-			off = "yes"
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", p.Name, "claude", acct, poolMark(!p.Disabled), "-")
+		n++
+	}
+	for _, p := range loadProviderRows() {
+		acct := p.Account
+		if acct == "" {
+			acct = "-"
 		}
 		model := p.Model
 		if model == "" {
 			model = "-"
 		}
-		acct := p.Account
-		if acct == "" {
-			acct = "-"
-		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n", p.ID, acct, p.Type, p.Priority, model, authSet, off)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", p.ID, providerKindLabel(p.Type), acct, poolMark(p.InRotatePool()), model)
+		n++
 	}
 	w.Flush()
+	if n == 0 {
+		term.Warn("No accounts. am add / am login / am api add")
+	}
+}
+
+// CmdPool lists accounts currently in the rotate pool (POOL=IN).
+func CmdPool() {
+	term.Header("amux pool", "rotate set · am pool add|remove <id>")
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(w, term.Dim("ID\tKIND\tPRIORITY\tMODEL"))
+	n := 0
+	for _, p := range profile.ListProfiles("claude") {
+		if p.Disabled {
+			continue
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", p.Name, "claude", "-", "-")
+		n++
+	}
+	for _, p := range loadProviderRows() {
+		if !p.InRotatePool() {
+			continue
+		}
+		model := p.Model
+		if model == "" {
+			model = "-"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%d\t%s\n", p.ID, providerKindLabel(p.Type), p.Priority, model)
+		n++
+	}
+	w.Flush()
+	if n == 0 {
+		term.Warn("Rotate pool empty. am pool add <id>  (see: am accounts)")
+	}
 }
 
 // CmdAccountsCmd handles `am accounts [priority <id> <N>]`.
@@ -672,7 +714,7 @@ func CmdAccountsCmd(args []string) {
 		fmt.Printf("set %s model to %s\n", args[1], args[2])
 	case "off", "disable":
 		if len(args) < 2 {
-			fmt.Println("Usage: amux accounts off <id>")
+			fmt.Println("Usage: am off <id>   (or: am pool remove <id>)")
 			return
 		}
 		if err := provider.SetEnabled(provider.DefaultAccountsPath(), args[1], false); err != nil {
@@ -680,10 +722,10 @@ func CmdAccountsCmd(args []string) {
 			return
 		}
 		proxy.Sync()
-		fmt.Printf("off %s — pool will skip it (am accounts on %s to restore)\n", args[1], args[1])
+		fmt.Printf("off %s — out of rotate (am on %s)\n", args[1], args[1])
 	case "on", "enable":
 		if len(args) < 2 {
-			fmt.Println("Usage: amux accounts on <id>")
+			fmt.Println("Usage: am on <id>   (or: am pool add <id>)")
 			return
 		}
 		if err := provider.SetEnabled(provider.DefaultAccountsPath(), args[1], true); err != nil {
@@ -691,9 +733,9 @@ func CmdAccountsCmd(args []string) {
 			return
 		}
 		proxy.Sync()
-		fmt.Printf("on %s — back in the pool\n", args[1])
+		fmt.Printf("on %s — back in rotate\n", args[1])
 	default:
-		fmt.Println("Usage: amux accounts [ls | rm <id> | priority <id> <N> | model <id> <model> | off <id> | on <id>]")
+		fmt.Println("Usage: am accounts | am accounts rm <id> | am pool add|remove|priority|model")
 	}
 }
 

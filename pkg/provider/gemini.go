@@ -12,7 +12,12 @@ import (
 	"amux-accounts/pkg/types"
 )
 
-const googleAIStudioBaseURL = "https://generativelanguage.googleapis.com/v1beta/openai"
+const (
+	googleAIStudioBaseURL = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+	DefaultGeminiFlashModel = "gemini-2.5-flash"
+	DefaultGeminiProModel   = "gemini-3.1-pro-preview"
+)
 
 // googleAIStudioModelsURL is a var (not const) so tests can point it at an
 // httptest server instead of the real Google endpoint.
@@ -23,31 +28,39 @@ type GeminiAdapter struct {
 	AdapterID   string
 	PriorityLvl int
 	APIKey      string
-	TargetModel string // default: gemini-3.6-flash
+	FlashModel  string
+	ProModel    string
+	TargetModel string
 	HTTPClient  *http.Client
 
 	wrapped types.ProviderAdapter
 }
 
 func NewGeminiAdapter(id string, priority int, apiKey, model string) *GeminiAdapter {
-	if model == "" {
-		model = "gemini-3.6-flash"
-	}
 	if id == "" {
 		id = "google-ai-studio"
 	}
+	flash := DefaultGeminiFlashModel
+	pro := DefaultGeminiProModel
+
+	if model != "" {
+		if strings.Contains(model, "pro") {
+			pro = model
+		} else {
+			flash = model
+		}
+	} else {
+		model = flash
+	}
+
 	return &GeminiAdapter{
 		AdapterID:   id,
 		PriorityLvl: priority,
 		APIKey:      apiKey,
+		FlashModel:  flash,
+		ProModel:    pro,
 		TargetModel: model,
-		wrapped: &OpenAICompatibleAdapter{
-			AdapterID:   id,
-			PriorityLvl: priority,
-			BaseURL:     googleAIStudioBaseURL,
-			APIKey:      apiKey,
-			TargetModel: model,
-		},
+		HTTPClient:  defaultHTTPClient,
 	}
 }
 
@@ -58,7 +71,35 @@ func (a *GeminiAdapter) SendMessageStream(ctx context.Context, req *types.ChatRe
 	if a.APIKey == "" {
 		return nil, fmt.Errorf("%s: %w: empty API key", a.AdapterID, types.ErrAuthentication)
 	}
-	return a.wrapped.SendMessageStream(ctx, req)
+
+	selectedModel := a.TargetModel
+	if a.FlashModel != "" {
+		selectedModel = a.FlashModel
+	}
+
+	// Auto-escalation: If heavy task is detected or thinking is requested, switch to Pro model (e.g. gemini-3.1-pro-preview)
+	if strings.EqualFold(req.TargetTier, "pro") || req.Thinking {
+		pro := a.ProModel
+		if pro == "" {
+			pro = DefaultGeminiProModel
+		}
+		selectedModel = pro
+	} else if req.Model != "" && strings.Contains(req.Model, "pro") {
+		selectedModel = a.ProModel
+		if selectedModel == "" {
+			selectedModel = DefaultGeminiProModel
+		}
+	}
+
+	adapter := &OpenAICompatibleAdapter{
+		AdapterID:   a.AdapterID,
+		PriorityLvl: a.PriorityLvl,
+		BaseURL:     googleAIStudioBaseURL,
+		APIKey:      a.APIKey,
+		TargetModel: selectedModel,
+		HTTPClient:  a.HTTPClient,
+	}
+	return adapter.SendMessageStream(ctx, req)
 }
 
 // geminiModelsResponse is the subset of v1beta/models we need to pick a
@@ -128,8 +169,10 @@ func pickGeminiModel(parsed geminiModelsResponse) string {
 			any = name
 		}
 		switch {
-		case pro == "" && strings.Contains(name, "-pro"):
-			pro = name
+		case strings.Contains(name, "-pro"):
+			if pro == "" || strings.Contains(name, "3.1") {
+				pro = name
+			}
 		case flash == "" && strings.Contains(name, "-flash") && !strings.Contains(name, "-lite"):
 			flash = name
 		}

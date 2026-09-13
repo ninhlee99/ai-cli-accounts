@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -13,6 +14,17 @@ import (
 	"amux-accounts/pkg/router"
 	"amux-accounts/pkg/types"
 )
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "am-bridge-test-")
+	if err != nil {
+		panic(err)
+	}
+	_ = os.Setenv("AM_HOME", dir)
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 type mockStreamAdapter struct {
 	id     string

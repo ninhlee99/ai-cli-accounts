@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"amux-accounts/pkg/tools"
 	"amux-accounts/pkg/types"
 )
 
@@ -35,6 +36,11 @@ const chatGPTConversationURL = "https://chatgpt.com/backend-api/conversation"
 
 func (a *ChatGPTWebAdapter) ID() string    { return a.AdapterID }
 func (a *ChatGPTWebAdapter) Priority() int { return a.PriorityLvl }
+
+// SupportsTools is false: ChatGPT web flattens to one text prompt and
+// cannot emit Claude/OpenAI tool_use. Pool Send skips this adapter when
+// the client sent tools[].
+func (a *ChatGPTWebAdapter) SupportsTools() bool { return false }
 
 func (a *ChatGPTWebAdapter) client() *http.Client {
 	if a.HTTPClient != nil {
@@ -66,7 +72,7 @@ func BuildConcatenatedPrompt(messages []types.ChatMessage) string {
 
 	var sys strings.Builder
 	var sb strings.Builder
-	for _, m := range messages {
+	for idx, m := range messages {
 		role := strings.ToLower(m.Role)
 		switch role {
 		case "system":
@@ -93,14 +99,19 @@ func BuildConcatenatedPrompt(messages []types.ChatMessage) string {
 			}
 			sb.WriteString("\n\n")
 		case "tool":
-			sb.WriteString("Tool")
+			sb.WriteString("[Tool result — CLI ran]")
 			if m.ToolCallID != "" {
 				sb.WriteString(" (")
 				sb.WriteString(m.ToolCallID)
 				sb.WriteString(")")
 			}
-			sb.WriteString(": ")
-			sb.WriteString(m.Content)
+			sb.WriteString(":\n")
+			content := m.Content
+			if idx < len(messages)-3 && len([]rune(content)) > 1500 {
+				r := []rune(content)
+				content = string(r[:600]) + "\n... [output truncated for brevity] ...\n" + string(r[len(r)-200:])
+			}
+			sb.WriteString(content)
 			sb.WriteString("\n\n")
 		default:
 			title := role
@@ -223,7 +234,7 @@ func (a *ChatGPTWebAdapter) SendMessageStream(ctx context.Context, req *types.Ch
 
 	out := make(chan types.StreamChunk)
 	go streamChatGPTWeb(ctx, a, resp, out)
-	return out, nil
+	return tools.MaybeWrapWebStream(a.AdapterID, req, out), nil
 }
 
 func (a *ChatGPTWebAdapter) resetConversation() {
@@ -263,6 +274,7 @@ func streamChatGPTWeb(ctx context.Context, a *ChatGPTWebAdapter, resp *http.Resp
 	sc.Buffer(make([]byte, 64*1024), 2<<20)
 
 	var lastText string
+	var lastThought string
 	var convID, msgID string
 	doneSent := false
 	for sc.Scan() {
@@ -314,6 +326,26 @@ func streamChatGPTWeb(ctx context.Context, a *ChatGPTWebAdapter, resp *http.Resp
 			continue
 		}
 		ctype := chunk.Message.Content.ContentType
+		if ctype == "thought" {
+			if len(chunk.Message.Content.Parts) > 0 {
+				fullThought := chunk.Message.Content.Parts[0]
+				if strings.HasPrefix(fullThought, lastThought) {
+					delta := fullThought[len(lastThought):]
+					lastThought = fullThought
+					if delta != "" {
+						if !sendChunk(ctx, out, types.StreamChunk{ID: id, Thinking: delta}) {
+							return
+						}
+					}
+				} else {
+					lastThought = fullThought
+					if !sendChunk(ctx, out, types.StreamChunk{ID: id, Thinking: fullThought}) {
+						return
+					}
+				}
+			}
+			continue
+		}
 		if ctype != "" && ctype != "text" {
 			continue
 		}

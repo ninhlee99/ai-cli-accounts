@@ -862,13 +862,46 @@ func panelUsage(w, h int, s watchSnap, showSpark bool, periodLabel string) strin
 
 func panelActivityMerged(w, h int, s watchSnap, scroll int) string {
 	lw, lh, rw, rh, stacked := activityLayout(w, h)
-	// Scroll only LIVE FLOW; right column always shows newest lines.
+	// Left: tool flow. Right: full ChatGPT / web reply of focused card.
 	left := panelRequestFlow(lw, lh, s, scroll)
-	right := panelActivityRight(rw, rh, s, 0)
+	right := panelReplyFull(rw, rh, focusedFlowItem(s, scroll, lw, lh))
 	if stacked {
 		return lipgloss.JoinVertical(lipgloss.Left, left, right)
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right)
+}
+
+func focusedFlowItem(s watchSnap, scroll, w, h int) types.RequestEntry {
+	items := toolRequestItems(s)
+	if len(items) == 0 {
+		return types.RequestEntry{}
+	}
+	_, nShow, _ := flowViewport(w, h)
+	end := len(items) - scroll
+	if end < 1 {
+		end = 1
+	}
+	if end > len(items) {
+		end = len(items)
+	}
+	if nShow > 0 && end-nShow > 0 && scroll == 0 {
+		// live page: newest card
+		return items[end-1]
+	}
+	return items[end-1]
+}
+
+func panelReplyFull(w, h int, r types.RequestEntry) string {
+	acct := types.DisplayAccountID(r.Account)
+	title := "REPLY"
+	if acct != "" {
+		title = "REPLY  " + acct
+	}
+	body := strings.TrimSpace(r.Output)
+	if body == "" {
+		return watchPanel(title, w, h, colPurple, rowDim.Render("no chatgpt text yet…"))
+	}
+	return watchPanel(title, w, h, colPurple, body)
 }
 
 // activityLayout returns left/right panel sizes. stacked=true → vertical.
@@ -882,10 +915,10 @@ func activityLayout(w, h int) (lw, lh, rw, rh int, stacked bool) {
 		}
 		return w, flowH, w, h - flowH, true
 	case w < 100:
-		lw = (w * 50) / 100
+		lw = (w * 40) / 100
 		return lw, h, w - lw - gap, h, false
 	default:
-		lw = (w * 55) / 100
+		lw = (w * 38) / 100
 		return lw, h, w - lw - gap, h, false
 	}
 }
@@ -934,7 +967,7 @@ func panelPoolLogs(w, h int, s watchSnap, scroll int) string {
 	}
 	inner := maxInt(w-6, 12)
 	rows := make([]string, 0, end-start)
-	for i := end - 1; i >= start; i-- {
+	for i := start; i < end; i++ {
 		rows = append(rows, logRowLip(items[i], inner))
 	}
 	body := rowDim.Render("—")
@@ -974,18 +1007,40 @@ func flowItemLines(d flowDensity) int {
 	case flowCompact:
 		return 2
 	default:
-		return 6 // rounded border + 3 content lines
+		return 7 // rounded border + 4 content lines (args/output)
 	}
 }
 
 func toolRequestItems(s watchSnap) []types.RequestEntry {
 	var items []types.RequestEntry
 	for _, r := range s.Requests {
-		if len(r.Tools) > 0 || len(r.Redactions) > 0 || r.StopReason == "privacy_scrub" {
-			items = append(items, r)
+		if isPrivacyRedact(r) || isTestFlowAccount(r.Account) {
+			continue
 		}
+		if isWebReplyAccount(r.Account) && strings.TrimSpace(r.Output) != "" {
+			items = append(items, r)
+			continue
+		}
+		if len(r.Tools) == 0 || r.Tools[0] == "privacy" {
+			continue
+		}
+		items = append(items, r)
 	}
 	return items
+}
+
+func isWebReplyAccount(account string) bool {
+	a := strings.ToLower(account)
+	return strings.Contains(a, "chatgpt") || strings.Contains(a, ":web")
+}
+
+func isTestFlowAccount(account string) bool {
+	switch strings.ToLower(strings.TrimSpace(account)) {
+	case "test-adapter", "cursor-stream", "cursor-pool", "pool:01":
+		return true
+	default:
+		return false
+	}
 }
 
 // flowViewport returns density + how many items fit in panel height h.
@@ -1042,7 +1097,8 @@ func panelRequestFlow(w, h int, s watchSnap, scroll int) string {
 		scroll = maxScroll
 	}
 
-	// items newest-last; scroll 0 = newest page
+	// Chronological: oldest of the window first, newest last (bottom).
+	// scroll 0 = live page (newest). ↑ older.
 	end := len(items) - scroll
 	start := end - nShow
 	if start < 0 {
@@ -1053,25 +1109,26 @@ func panelRequestFlow(w, h int, s watchSnap, scroll int) string {
 	itemH := flowItemLines(dens)
 	var parts []string
 	used := 0
-	for i := len(slice) - 1; i >= 0; i-- {
+	for i := 0; i < len(slice); i++ {
 		if used+itemH > bodyBudget-1 && used > 0 {
-			break
+			// drop oldest of this window so newest still fits
+			parts = parts[1:]
+			used -= itemH
 		}
 		parts = append(parts, requestFlowBox(slice[i], w, dens))
 		used += itemH
 	}
 
 	body := strings.Join(parts, "\n")
-	hint := rowDim.Render(fmt.Sprintf("%d/%d · ↑↓ scroll", len(parts), len(items)))
+	hint := rowDim.Render(fmt.Sprintf("%d/%d · ↑ older", len(parts), len(items)))
 	if maxScroll > 0 {
-		hint = rowDim.Render(fmt.Sprintf("%d/%d · scroll %d/%d", len(parts), len(items), scroll, maxScroll))
+		hint = rowDim.Render(fmt.Sprintf("%d/%d · -%d", len(parts), len(items), scroll))
 	}
 	if used < bodyBudget {
 		body += "\n" + hint
 	}
 
-	// Hard-cap rendered height so outer View never clips mid-box.
-	return watchPanel("LIVE FLOW", w, h, colCyan, body)
+	return watchPanelBottom("LIVE FLOW", w, h, colCyan, body)
 }
 
 func clientLabel(dialect string) string {
@@ -1102,14 +1159,14 @@ func requestFlowBox(r types.RequestEntry, width int, dens flowDensity) string {
 		acct = "pool"
 	}
 
-	isPrivacy := len(r.Redactions) > 0 || r.StopReason == "privacy_scrub" ||
-		(len(r.Tools) > 0 && r.Tools[0] == "privacy")
-
 	status := pillUp.Render("ok")
-	if r.Error != "" {
+	if r.Error != "" || r.ToolStatus == "err" {
 		status = pillDown.Render("err")
-	} else if isPrivacy {
-		status = pillWarn.Render("scrub")
+	} else if r.ToolStatus != "ok" && r.StopReason != "tool_use" && r.StopReason != "tool_calls" {
+		status = pillWarn.Render(truncateRunes(r.StopReason, 8))
+		if r.StopReason == "" {
+			status = pillWarn.Render("—")
+		}
 	}
 	toolsStyle := pillUp
 	switch r.ToolStatus {
@@ -1120,15 +1177,9 @@ func requestFlowBox(r types.RequestEntry, width int, dens flowDensity) string {
 	default:
 		toolsStyle = pillWarn
 	}
-	if isPrivacy {
-		toolsStyle = pillWarn
-	}
 	toolNames := strings.Join(r.Tools, ",")
 	if toolNames == "" {
 		toolNames = "—"
-	}
-	if isPrivacy && len(r.Redactions) > 0 {
-		toolNames = "privacy:" + strings.Join(r.Redactions, ",")
 	}
 
 	latStyle := rowDim
@@ -1152,8 +1203,9 @@ func requestFlowBox(r types.RequestEntry, width int, dens flowDensity) string {
 		line1 := lipgloss.NewStyle().Foreground(colTextHi).Render(truncateRunes(client, 12)) +
 			rowDim.Render(" · "+ts+" · ") + status + " " + latStyle.Render(fmt.Sprintf("%dms", r.DurationMs))
 		mid := "Tools"
-		if isPrivacy {
-			mid = "SCRUB"
+		detail := strings.TrimSpace(r.Output)
+		if detail == "" {
+			detail = toolNames
 		}
 		line2 := lipgloss.NewStyle().Foreground(colBlue).Render("PROXY") +
 			rowDim.Render("→") +
@@ -1163,7 +1215,7 @@ func requestFlowBox(r types.RequestEntry, width int, dens flowDensity) string {
 			rowDim.Render("→") +
 			lipgloss.NewStyle().Foreground(colPurple).Render(truncateRunes(client, 10)) +
 			rowDim.Render(" ") +
-			toolsStyle.Render(truncateRunes(toolNames, maxInt(width-50, 6)))
+			toolsStyle.Render(truncateRunes(detail, maxInt(width-36, 8)))
 		return line1 + "\n" + line2
 
 	default:
@@ -1173,31 +1225,26 @@ func requestFlowBox(r types.RequestEntry, width int, dens flowDensity) string {
 		aiNode := lipgloss.NewStyle().Foreground(colCyan).Render("✦ " + acctShort)
 		clientNode := lipgloss.NewStyle().Foreground(colPurple).Render(client)
 		toolsNode := toolsStyle.Render("Tools")
-		if isPrivacy {
-			toolsNode = toolsStyle.Render("SCRUB")
-		}
 		arrow := rowDim.Render(" → ")
 		flow := proxyNode + arrow + aiNode + arrow + toolsNode + arrow + clientNode
 
 		head := lipgloss.NewStyle().Foreground(colTextHi).Bold(true).Render(client) +
 			rowDim.Render(" · "+ts+" · ") + status + "  " + latStyle.Render(fmt.Sprintf("%dms", r.DurationMs))
 		toolLine := rowDim.Render("tools ") + toolsStyle.Render(truncateRunes(toolNames, maxInt(innerW-8, 8)))
-		if isPrivacy {
-			preview := r.Input
-			if preview == "" {
-				preview = "sensitive data replaced with samples"
-			}
-			toolLine = rowDim.Render("scrub ") + toolsStyle.Render(truncateRunes(preview, maxInt(innerW-8, 8)))
-		}
 
-		lines := []string{head, flow, toolLine}
-		// Fixed 3 content lines → stable height for scroll/fit math.
+		detail := strings.TrimSpace(r.Output)
+		if detail == "" {
+			detail = strings.TrimSpace(r.Input)
+		}
+		if detail == "" {
+			detail = "—"
+		}
+		argLine := rowDim.Render(truncateRunes(strings.ReplaceAll(detail, "\n", " "), innerW))
+		lines := []string{head, flow, toolLine, argLine}
 
 		accent := colCyan
-		if r.Error != "" {
+		if r.Error != "" || r.ToolStatus == "err" {
 			accent = colRed
-		} else if isPrivacy {
-			accent = colYellow
 		} else if r.ToolStatus == "ok" {
 			accent = colGreen
 		}
@@ -1210,8 +1257,29 @@ func requestFlowBox(r types.RequestEntry, width int, dens flowDensity) string {
 	}
 }
 
+func logsInnerLimit(h int) int {
+	return maxInt(h-4, 1)
+}
+
+func logsMaxScroll(h int, s watchSnap) int {
+	n := len(s.Activity)
+	limit := logsInnerLimit(h)
+	if n <= limit {
+		return 0
+	}
+	return n - limit
+}
+
+func dashLogsMaxScroll(w, h int, s watchSnap) int {
+	if w < 100 {
+		slot := maxInt(h/5, 1)
+		return logsMaxScroll(maxInt(h-slot*4, 1), s)
+	}
+	return logsMaxScroll(h, s)
+}
+
 func panelLogsOnly(w, h int, s watchSnap, scroll int) string {
-	limit := maxInt(h-5, 4)
+	limit := logsInnerLimit(h)
 	items := s.Activity
 	start := len(items) - limit - scroll
 	if start < 0 {
@@ -1226,15 +1294,18 @@ func panelLogsOnly(w, h int, s watchSnap, scroll int) string {
 	}
 	inner := maxInt(w-6, 20)
 	rows := make([]string, 0, end-start)
-	for i := end - 1; i >= start; i-- {
+	for i := start; i < end; i++ {
 		rows = append(rows, logRowLip(items[i], inner))
 	}
-	body := rowDim.Render("—")
+	body := ""
 	if len(rows) > 0 {
 		body = strings.Join(rows, "\n")
-		body += "\n" + rowDim.Render(fmt.Sprintf("%d/%d", len(rows), len(items)))
 	}
-	return watchPanel("LOGS", w, h, colPurple, body)
+	title := "LOGS  follow"
+	if scroll > 0 {
+		title = fmt.Sprintf("LOGS  -%d", scroll)
+	}
+	return watchPanelBottom(title, w, h, colPurple, body)
 }
 
 func panelReqsOnly(w, h int, s watchSnap, scroll int) string {
@@ -1272,6 +1343,8 @@ func logRowLip(e types.EventEntry, maxW int) string {
 		tagColor = colBlue
 	case "POOL", "FAIL OVER", "FAILOVER":
 		tagColor = colGreen
+	case "TOOLS":
+		tagColor = colCyan
 	case "ERROR", "AUTH":
 		tagColor = colRed
 	case "WARN", "DEGRADED":

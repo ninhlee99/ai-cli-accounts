@@ -3,6 +3,7 @@ package proxy
 import (
 	"amux-accounts/pkg/monitor"
 	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -111,17 +112,19 @@ func RunProxy(addr, upstream string) error {
 	var srv *http.Server
 	var authToken string
 	if IsPublicBind(addr) {
-		token, err := LoadOrCreateAuthToken()
+		token, err := IssueNewAuthToken()
 		if err != nil {
-			return fmt.Errorf("generate admin token: %w", err)
+			return fmt.Errorf("generate public API key: %w", err)
 		}
 		authToken = token
-		term.LogProxy("public bind: admin token required for non-loopback requests (see: am proxy token)")
+		term.LogProxy("public bind: API key %s required for non-loopback requests (see: am proxy token)", authToken)
 	}
 	handler := newHandler(rot, life, mode, pool, pool, rp, upstream, sw, authToken, func() {
 		if srv != nil {
 			_ = srv.Close()
 		}
+		_ = ClearAuthToken()
+		StopAuthRateLimiter()
 	})
 	if authToken != "" {
 		handler = requireAuth(authToken, handler)
@@ -141,8 +144,25 @@ func RunProxy(addr, upstream string) error {
 // hasCallerCredential reports whether the incoming request already carries
 // its own Anthropic credential (an API key, or an OAuth-style bearer token
 // from the client) rather than needing one injected by the rotator.
-func hasCallerCredential(r *http.Request) bool {
-	return r.Header.Get("X-Api-Key") != "" || strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")
+// If the token matches proxyToken (the proxy's public amux-<token>), it is treated
+// as proxy authentication rather than an upstream Anthropic key.
+func hasCallerCredential(r *http.Request, proxyToken string) bool {
+	key := strings.TrimSpace(r.Header.Get("X-Api-Key"))
+	if key != "" {
+		if proxyToken == "" || subtle.ConstantTimeCompare([]byte(key), []byte(proxyToken)) != 1 {
+			return true
+		}
+	}
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		bearer := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+		if bearer != "" {
+			if proxyToken == "" || subtle.ConstantTimeCompare([]byte(bearer), []byte(proxyToken)) != 1 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // newReverseProxy builds the httputil.ReverseProxy that forwards to the real
@@ -183,8 +203,8 @@ func newReverseProxy(upstream string, rot *Rotator) (*httputil.ReverseProxy, err
 			// credential (hasCallerCredential), it passes through
 			// unchanged — that's their key, not ours to touch. If not,
 			// server.go already refused the request before reaching here.
-			// Scrub body before it leaves the machine toward Anthropic/upstream.
-			scrubOutboundBody(r)
+			// Redact body before it leaves the machine toward Anthropic/upstream.
+			redactOutboundBody(r)
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			rot.Observe(resp)
@@ -339,6 +359,12 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 			return
 		}
 
+		// Gemini / Antigravity Gateway
+		if strings.Contains(path, ":generateContent") || strings.Contains(path, ":streamGenerateContent") {
+			bridge.HandleGeminiGenerateContent(w, r, chatPool)
+			return
+		}
+
 		// Anthropic messages (/v1/messages) — Claude Code / tool clients.
 		//
 		// Same model as attaching an API key to Claude Code:
@@ -355,9 +381,11 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 				http.Error(w, "read request body: "+err.Error(), http.StatusBadRequest)
 				return
 			}
-			if scrubbed, res := privacy.ScrubBytes(body); res.Len() > 0 {
-				body = scrubbed
-				privacy.LogHits(r, res, "claude")
+			if privacy.Enabled {
+				if redacted, res := privacy.RedactBytes(body); res.Len() > 0 {
+					body = redacted
+					privacy.LogHits(r, res, "claude")
+				}
 			}
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			r.ContentLength = int64(len(body))
@@ -377,7 +405,18 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 			// silently escape to the real Anthropic API instead of failing
 			// loud (see newReverseProxy's doc comment for the same rule
 			// applied to the Director).
-			hasAPIKey := hasCallerCredential(r)
+			hasAPIKey := hasCallerCredential(r, authToken)
+			if authToken != "" {
+				if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(r.Header.Get("X-Api-Key"))), []byte(authToken)) == 1 {
+					r.Header.Del("X-Api-Key")
+				}
+				if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+					bearer := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+					if subtle.ConstantTimeCompare([]byte(bearer), []byte(authToken)) == 1 {
+						r.Header.Del("Authorization")
+					}
+				}
+			}
 
 			claudeUsable := !rot.ShouldFailoverToProviderPool() &&
 				(rot.Token() != "" || rot.ProfileCount() > 0)
@@ -473,9 +512,9 @@ func anthropicRequestHasTools(body []byte) bool {
 	return len(wrap.Tools) > 0
 }
 
-// scrubOutboundBody rewrites r.Body in place, replacing secrets with samples
+// redactOutboundBody rewrites r.Body in place, replacing secrets with samples
 // before httputil.ReverseProxy dials the upstream. Safe to call repeatedly.
-func scrubOutboundBody(r *http.Request) {
+func redactOutboundBody(r *http.Request) {
 	if r == nil || r.Body == nil || r.Method == http.MethodGet || r.Method == http.MethodHead {
 		return
 	}
@@ -486,9 +525,11 @@ func scrubOutboundBody(r *http.Request) {
 		r.ContentLength = 0
 		return
 	}
-	if scrubbed, res := privacy.ScrubBytes(body); res.Len() > 0 {
-		body = scrubbed
-		privacy.LogHits(r, res, "claude")
+	if privacy.Enabled {
+		if redacted, res := privacy.RedactBytes(body); res.Len() > 0 {
+			body = redacted
+			privacy.LogHits(r, res, "claude")
+		}
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))

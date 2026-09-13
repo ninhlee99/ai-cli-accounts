@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"amux-accounts/pkg/router"
 	"amux-accounts/pkg/tools"
@@ -34,6 +35,10 @@ type AnthropicMessageRequest struct {
 	Stream      bool              `json:"stream,omitempty"`
 	Temperature float64           `json:"temperature,omitempty"`
 	ToolChoice  any               `json:"tool_choice,omitempty"`
+	Thinking    *struct {
+		Type         string `json:"type"`
+		BudgetTokens int    `json:"budget_tokens"`
+	} `json:"thinking,omitempty"`
 }
 
 // ToChatRequest converts an Anthropic /v1/messages payload into a standardized types.ChatRequest.
@@ -54,6 +59,11 @@ func ToChatRequest(body []byte) (*types.ChatRequest, error) {
 		Messages:      []types.ChatMessage{},
 		FullContext:   true,
 		ClientDialect: tools.DialectClaude,
+	}
+
+	if aReq.Thinking != nil && aReq.Thinking.Type == "enabled" {
+		req.Thinking = true
+		req.ThinkingBudget = aReq.Thinking.BudgetTokens
 	}
 
 	if tools, err := tools.ParseClaudeTools(body); err == nil && len(tools) > 0 {
@@ -147,6 +157,20 @@ func expandAnthropicMessage(role string, raw json.RawMessage) []types.ChatMessag
 				}
 				text.WriteString(t)
 			}
+		case "thinking":
+			var th string
+			_ = json.Unmarshal(b["thinking"], &th)
+			if th != "" {
+				if text.Len() > 0 {
+					text.WriteByte('\n')
+				}
+				text.WriteString("<thinking>\n" + th + "\n</thinking>")
+			}
+		case "redacted_thinking":
+			if text.Len() > 0 {
+				text.WriteByte('\n')
+			}
+			text.WriteString("<thinking>[redacted]</thinking>")
 		case "tool_use":
 			var id, name string
 			_ = json.Unmarshal(b["id"], &id)
@@ -273,35 +297,60 @@ func truncateRunes(s string, n int) string {
 func HandleClaudeMessages(w http.ResponseWriter, r *http.Request, pool *router.AccountPoolRouter, rawBody []byte) error {
 	req, err := ToChatRequest(rawBody)
 	if err != nil {
+		logChatRequest(r, pool, nil, "", "error", err.Error(), 0, 0, time.Now(), nil)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return err
 	}
 
 	started := time.Now()
+	msgID := fmt.Sprintf("msg_%d", time.Now().UnixNano())
+
+	// Stream: flush message_start before the upstream call so Claude Code
+	// does not sit on "Waiting for API response / check your network" during
+	// ChatGPT sentinel + PoW + TTFB (often 30–90s).
+	var flusher http.Flusher
+	if req.Stream {
+		var ferr error
+		flusher, ferr = beginAnthropicSSE(w, req, msgID)
+		if ferr != nil {
+			return ferr
+		}
+	}
+
 	stream, err := poolSend(r, pool, req)
 	if err != nil {
 		logChatRequest(r, pool, req, "", "", err.Error(), 0, 0, started, nil)
+		if req.Stream && flusher != nil {
+			writeAnthropicSSEError(w, flusher, err)
+			return err
+		}
 		http.Error(w, fmt.Sprintf("all providers failed: %v", err), http.StatusBadGateway)
 		return err
 	}
 
-	msgID := fmt.Sprintf("msg_%d", time.Now().UnixNano())
-
 	if req.Stream {
-		return writeAnthropicSSE(w, r, pool, req, stream, msgID, started)
+		return writeAnthropicSSE(w, flusher, r, pool, req, stream, msgID, started)
 	}
 
 	var fullContent strings.Builder
+	var thinkingContent strings.Builder
 	var toolCalls []types.ToolCall
+	var logText string
 	finishReason := "end_turn"
 	for chunk := range stream {
 		if chunk.Error != nil {
 			http.Error(w, chunk.Error.Error(), http.StatusBadGateway)
 			return chunk.Error
 		}
+		if chunk.Thinking != "" {
+			thinkingContent.WriteString(chunk.Thinking)
+		}
 		fullContent.WriteString(chunk.Content)
+		if chunk.LogText != "" {
+			logText = chunk.LogText
+		}
 		if len(chunk.ToolCalls) > 0 {
-			toolCalls = chunk.ToolCalls
+			toolCalls = append(toolCalls, chunk.ToolCalls...)
 		}
 		if chunk.FinishReason != "" {
 			finishReason = mapFinishReasonAnthropic(chunk.FinishReason)
@@ -310,14 +359,33 @@ func HandleClaudeMessages(w http.ResponseWriter, r *http.Request, pool *router.A
 			break
 		}
 	}
+	// Deduplicate tool calls by ID if present
 	if len(toolCalls) > 0 {
+		seen := map[string]bool{}
+		var unique []types.ToolCall
+		for _, tc := range toolCalls {
+			if tc.ID != "" && seen[tc.ID] {
+				continue
+			}
+			if tc.ID != "" {
+				seen[tc.ID] = true
+			}
+			unique = append(unique, tc)
+		}
+		toolCalls = unique
 		finishReason = "tool_use"
 	}
 
-	inputTokens := len(req.Messages) * 10
-	outputTokens := len(fullContent.String()) / 4
+	inputTokens := estimateInputTokens(req)
+	outputTokens := estimateStringTokens(fullContent.String()) + estimateStringTokens(thinkingContent.String())
+	if outputTokens < 1 {
+		outputTokens = 1
+	}
 
 	content := []any{}
+	if thinkingContent.Len() > 0 {
+		content = append(content, map[string]string{"type": "thinking", "thinking": thinkingContent.String()})
+	}
 	if fullContent.Len() > 0 {
 		content = append(content, map[string]string{"type": "text", "text": fullContent.String()})
 	}
@@ -344,12 +412,99 @@ func HandleClaudeMessages(w http.ResponseWriter, r *http.Request, pool *router.A
 	}
 	err = json.NewEncoder(w).Encode(respObj)
 	recordPoolUsage(r, pool, req.Model, inputTokens, outputTokens)
-	logChatRequest(r, pool, req, fullContent.String(), finishReason, "", inputTokens, outputTokens, started, toolCalls)
+	logChatRequest(r, pool, req, pickLogOutput(fullContent.String(), logText), finishReason, "", inputTokens, outputTokens, started, toolCalls)
 	return err
 }
 
-func writeAnthropicSSE(w http.ResponseWriter, r *http.Request, pool *router.AccountPoolRouter, req *types.ChatRequest, stream <-chan types.StreamChunk, msgID string, started time.Time) error {
-	ctx := r.Context()
+// EstimateStringTokens computes a realistic BPE token count approximation.
+func EstimateStringTokens(s string) int {
+	return estimateStringTokens(s)
+}
+
+// EstimateInputTokens estimates token usage for a chat request.
+func EstimateInputTokens(req *types.ChatRequest) int {
+	return estimateInputTokens(req)
+}
+
+// EstimateBytesTokens is the exported wrapper for estimateBytesTokens.
+// It produces the same result as EstimateStringTokens(string(b)) without the allocation.
+func EstimateBytesTokens(b []byte) int {
+	return estimateBytesTokens(b)
+}
+
+// estimateStringTokens computes a realistic BPE token count approximation
+// for ASCII, multi-byte UTF-8 (Vietnamese, CJK), and symbols.
+func estimateStringTokens(s string) int {
+	if s == "" {
+		return 0
+	}
+	tokens := 0
+	asciiChars := 0
+	for _, r := range s {
+		if r < 128 {
+			asciiChars++
+		} else {
+			// Multi-byte runes (e.g. Vietnamese accented letters, CJK characters, emojis)
+			// BPE tokenizers typically tokenize these into 1 to 1.5 tokens each.
+			tokens++
+		}
+	}
+	tokens += (asciiChars + 3) / 4
+	return tokens
+}
+
+// estimateBytesTokens is like estimateStringTokens but avoids the []byte→string
+// allocation for callers that already have a []byte (e.g. json.RawMessage schemas).
+// Uses utf8.DecodeRune for zero-alloc decoding that safely handles invalid/corrupted sequences.
+func estimateBytesTokens(b []byte) int {
+	if len(b) == 0 {
+		return 0
+	}
+	tokens := 0
+	asciiChars := 0
+	i := 0
+	for i < len(b) {
+		if b[i] < 0x80 {
+			asciiChars++
+			i++
+		} else {
+			// Multi-byte UTF-8 sequence or invalid byte.
+			// utf8.DecodeRune safely returns RuneError and size 1 on invalid bytes.
+			_, size := utf8.DecodeRune(b[i:])
+			tokens++
+			i += size
+		}
+	}
+	tokens += (asciiChars + 3) / 4
+	return tokens
+}
+
+func estimateInputTokens(req *types.ChatRequest) int {
+	if req == nil {
+		return 0
+	}
+	// System prompt is always in Messages[0] with Role=="system" (injected by
+	// ToChatRequest / geminiBodyToChatRequest), so it is already counted below
+	// — there is no separate req.System field in ChatRequest.
+	tokens := 3 // envelope overhead
+	for _, m := range req.Messages {
+		tokens += 4 // message role/formatting overhead
+		tokens += estimateStringTokens(m.Content)
+		for _, tc := range m.ToolCalls {
+			tokens += estimateStringTokens(tc.Name) + estimateStringTokens(tc.Arguments) + 4
+		}
+	}
+	for _, t := range req.Tools {
+		tokens += 8 // tool schema envelope overhead
+		tokens += estimateStringTokens(t.Name) + estimateStringTokens(t.Description) + estimateBytesTokens(t.InputSchema)
+	}
+	if tokens < 1 {
+		tokens = 1
+	}
+	return tokens
+}
+
+func beginAnthropicSSE(w http.ResponseWriter, req *types.ChatRequest, msgID string) (http.Flusher, error) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -357,7 +512,7 @@ func writeAnthropicSSE(w http.ResponseWriter, r *http.Request, pool *router.Acco
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return fmt.Errorf("streaming unsupported")
+		return nil, fmt.Errorf("streaming unsupported")
 	}
 
 	startJSON, _ := json.Marshal(map[string]any{
@@ -371,21 +526,58 @@ func writeAnthropicSSE(w http.ResponseWriter, r *http.Request, pool *router.Acco
 			"stop_reason":   nil,
 			"stop_sequence": nil,
 			"usage": map[string]int{
-				"input_tokens":  len(req.Messages) * 10,
+				"input_tokens":  estimateInputTokens(req),
 				"output_tokens": 1,
 			},
 		},
 	})
 	fmt.Fprintf(w, "event: message_start\ndata: %s\n\n", startJSON)
+	fmt.Fprintf(w, "event: ping\ndata: {\"type\":\"ping\"}\n\n")
 	flusher.Flush()
+	return flusher, nil
+}
+
+func writeAnthropicSSEError(w http.ResponseWriter, flusher http.Flusher, err error) {
+	errJSON, _ := json.Marshal(map[string]any{
+		"type": "error",
+		"error": map[string]string{
+			"type":    "api_error",
+			"message": err.Error(),
+		},
+	})
+	fmt.Fprintf(w, "event: error\ndata: %s\n\n", errJSON)
+	flusher.Flush()
+}
+
+func writeAnthropicSSEPing(w http.ResponseWriter, flusher http.Flusher) {
+	fmt.Fprintf(w, "event: ping\ndata: {\"type\":\"ping\"}\n\n")
+	flusher.Flush()
+}
+
+func writeAnthropicSSE(w http.ResponseWriter, flusher http.Flusher, r *http.Request, pool *router.AccountPoolRouter, req *types.ChatRequest, stream <-chan types.StreamChunk, msgID string, started time.Time) error {
+	ctx := r.Context()
 
 	var fullContent strings.Builder
+	var thinkingContent strings.Builder
 	var toolCalls []types.ToolCall
+	var logText string
 	finishReason := "end_turn"
 	textStarted := false
+	thinkingStarted := false
+	thinkingClosed := false
 	blockIndex := 0
 
+	closeThinkingBlock := func() {
+		if thinkingStarted && !thinkingClosed {
+			fmt.Fprintf(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", blockIndex)
+			flusher.Flush()
+			thinkingClosed = true
+			blockIndex++
+		}
+	}
+
 	ensureTextBlock := func() {
+		closeThinkingBlock()
 		if textStarted {
 			return
 		}
@@ -402,23 +594,58 @@ func writeAnthropicSSE(w http.ResponseWriter, r *http.Request, pool *router.Acco
 		textStarted = true
 	}
 
-	for chunk := range stream {
-		if ctx.Err() != nil {
+	ping := time.NewTicker(15 * time.Second)
+	defer ping.Stop()
+
+loop:
+	for {
+		var chunk types.StreamChunk
+		var ok bool
+		select {
+		case <-ctx.Done():
 			return ctx.Err()
+		case <-ping.C:
+			writeAnthropicSSEPing(w, flusher)
+			continue
+		case chunk, ok = <-stream:
+			if !ok {
+				break loop
+			}
 		}
 		if chunk.Error != nil {
-			errJSON, _ := json.Marshal(map[string]any{
-				"type": "error",
-				"error": map[string]string{
-					"type":    "api_error",
-					"message": chunk.Error.Error(),
-				},
-			})
-			fmt.Fprintf(w, "event: error\ndata: %s\n\n", errJSON)
-			flusher.Flush()
+			writeAnthropicSSEError(w, flusher, chunk.Error)
 			return chunk.Error
 		}
 
+		if chunk.LogText != "" {
+			logText = chunk.LogText
+		}
+		if chunk.Thinking != "" {
+			if !thinkingStarted {
+				cbStart, _ := json.Marshal(map[string]any{
+					"type":  "content_block_start",
+					"index": blockIndex,
+					"content_block": map[string]string{
+						"type":     "thinking",
+						"thinking": "",
+					},
+				})
+				fmt.Fprintf(w, "event: content_block_start\ndata: %s\n\n", cbStart)
+				flusher.Flush()
+				thinkingStarted = true
+			}
+			thinkingContent.WriteString(chunk.Thinking)
+			deltaJSON, _ := json.Marshal(map[string]any{
+				"type":  "content_block_delta",
+				"index": blockIndex,
+				"delta": map[string]string{
+					"type":     "thinking_delta",
+					"thinking": chunk.Thinking,
+				},
+			})
+			fmt.Fprintf(w, "event: content_block_delta\ndata: %s\n\n", deltaJSON)
+			flusher.Flush()
+		}
 		if chunk.Content != "" {
 			ensureTextBlock()
 			fullContent.WriteString(chunk.Content)
@@ -434,7 +661,7 @@ func writeAnthropicSSE(w http.ResponseWriter, r *http.Request, pool *router.Acco
 			flusher.Flush()
 		}
 		if len(chunk.ToolCalls) > 0 {
-			toolCalls = chunk.ToolCalls
+			toolCalls = append(toolCalls, chunk.ToolCalls...)
 		}
 		if chunk.FinishReason != "" {
 			finishReason = mapFinishReasonAnthropic(chunk.FinishReason)
@@ -444,12 +671,25 @@ func writeAnthropicSSE(w http.ResponseWriter, r *http.Request, pool *router.Acco
 		}
 	}
 
+	closeThinkingBlock()
 	if textStarted {
 		fmt.Fprintf(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", blockIndex)
 		blockIndex++
 	}
 
 	if len(toolCalls) > 0 {
+		seen := map[string]bool{}
+		var unique []types.ToolCall
+		for _, tc := range toolCalls {
+			if tc.ID != "" && seen[tc.ID] {
+				continue
+			}
+			if tc.ID != "" {
+				seen[tc.ID] = true
+			}
+			unique = append(unique, tc)
+		}
+		toolCalls = unique
 		finishReason = "tool_use"
 		for _, call := range toolCalls {
 			if call.ID == "" {
@@ -489,8 +729,11 @@ func writeAnthropicSSE(w http.ResponseWriter, r *http.Request, pool *router.Acco
 		fmt.Fprintf(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", blockIndex)
 	}
 
-	inputTokens := len(req.Messages) * 10
-	outputTokens := len(fullContent.String()) / 4
+	inputTokens := estimateInputTokens(req)
+	outputTokens := estimateStringTokens(fullContent.String()) + estimateStringTokens(thinkingContent.String())
+	if outputTokens < 1 {
+		outputTokens = 1
+	}
 
 	mDelta, _ := json.Marshal(map[string]any{
 		"type": "message_delta",
@@ -507,7 +750,7 @@ func writeAnthropicSSE(w http.ResponseWriter, r *http.Request, pool *router.Acco
 	flusher.Flush()
 
 	recordPoolUsage(r, pool, req.Model, inputTokens, outputTokens)
-	logChatRequest(r, pool, req, fullContent.String(), finishReason, "", inputTokens, outputTokens, started, toolCalls)
+	logChatRequest(r, pool, req, pickLogOutput(fullContent.String(), logText), finishReason, "", inputTokens, outputTokens, started, toolCalls)
 	return nil
 }
 

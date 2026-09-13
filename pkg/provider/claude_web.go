@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"amux-accounts/pkg/browser"
+	"amux-accounts/pkg/tools"
 	"amux-accounts/pkg/types"
 )
 
@@ -46,6 +47,9 @@ var claudeWebOrganizationsURL = "https://claude.ai/api/organizations"
 
 func (a *ClaudeWebAdapter) ID() string    { return a.AdapterID }
 func (a *ClaudeWebAdapter) Priority() int { return a.PriorityLvl }
+
+// SupportsTools is false: claude.ai chat has no Anthropic tool_use wire.
+func (a *ClaudeWebAdapter) SupportsTools() bool { return false }
 
 func (a *ClaudeWebAdapter) client() *http.Client {
 	if a.HTTPClient != nil {
@@ -131,6 +135,16 @@ func (a *ClaudeWebAdapter) SendMessageStream(ctx context.Context, req *types.Cha
 		"timezone":    "Asia/Ho_Chi_Minh",
 		"attachments": []any{},
 		"files":       []any{},
+	}
+	if req.Thinking {
+		budget := req.ThinkingBudget
+		if budget <= 0 {
+			budget = 2048
+		}
+		payloadMap["thinking"] = map[string]any{
+			"type":          "enabled",
+			"budget_tokens": budget,
+		}
 	}
 	b, err := json.Marshal(payloadMap)
 	if err != nil {
@@ -218,7 +232,7 @@ func (a *ClaudeWebAdapter) SendMessageStream(ctx context.Context, req *types.Cha
 
 	out := make(chan types.StreamChunk)
 	go streamClaudeWeb(ctx, a.AdapterID, resp, out)
-	return out, nil
+	return tools.MaybeWrapWebStream(a.AdapterID, req, out), nil
 }
 
 // ensureConversation reuses a persisted org+conversation across process
@@ -525,12 +539,13 @@ func streamClaudeWeb(ctx context.Context, id string, resp *http.Response, out ch
 
 		var chunk struct {
 			Completion   string `json:"completion"`
+			Thinking     string `json:"thinking"`
 			StopReason   string `json:"stop_reason"`
 			Error        any    `json:"error"`
 			MessageLimit *struct {
-				Type     string `json:"type"`
-				ResetsAt any    `json:"resetsAt"`
-				Remaining any   `json:"remaining"`
+				Type      string `json:"type"`
+				ResetsAt  any    `json:"resetsAt"`
+				Remaining any    `json:"remaining"`
 			} `json:"messageLimit"`
 		}
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
@@ -544,6 +559,11 @@ func streamClaudeWeb(ctx context.Context, id string, resp *http.Response, out ch
 		if chunk.MessageLimit != nil && chunk.MessageLimit.Type != "" && chunk.MessageLimit.Type != "within_limit" {
 			log.Printf("%s: Claude messageLimit=%s resetsAt=%v remaining=%v",
 				id, chunk.MessageLimit.Type, chunk.MessageLimit.ResetsAt, chunk.MessageLimit.Remaining)
+		}
+		if chunk.Thinking != "" {
+			if !sendChunk(ctx, out, types.StreamChunk{ID: id, Thinking: chunk.Thinking}) {
+				return
+			}
 		}
 		if chunk.Completion != "" {
 			if !sendChunk(ctx, out, types.StreamChunk{ID: id, Content: chunk.Completion}) {

@@ -38,51 +38,37 @@ func usageHelp() {
 	fmt.Print(`amux - AI CLI account manager & Local AI Gateway
 
 Setup (once):
-  amux setup [--auto-update]  do it all: hook install + /am:feedback + auto-update
+  amux setup [--auto-update]  hook install + /am:feedback + auto-update
 
-Account Profiles:
-  amux add [tool] [name]      save active account into a profile (default: claude)
-  amux ls [tool]              list saved profiles with short IDs (claude1, ...)
-  amux rm <id|name>           move a profile to trash (asks first)
-  amux rename <id|name> <new> rename a profile
-  amux restore <id|name>      restore a trashed profile
-  amux restore --backup       re-import latest auto-backup
-  amux sw                     interactive account & provider picker (↑/↓, Enter)
-  amux sw <id|name|provider>  switch to a specific account or LLM provider
-  amux off <id|name>          disable a Claude profile (skip auto-rotate + block am sw)
-  amux on <id|name>           re-enable a Claude profile
-  amux current [tool]         print the currently active account on system
-  amux status                 proxy state, rate limits (5h/7d), provider pool
-  amux watch                  live TUI: Dash · Accounts · Activity · Usage
+Accounts:
+  amux accounts               list ALL accounts (Claude + web + API)
+  amux off <id>               take any account out of rotate (stays in list)
+  amux on <id>                put it back
+  amux add [tool] [name]      save current CLI login (claude / codex / gemini)
+  amux rm <id|name>           delete Claude profile → trash
+  amux rename <id> <new>      rename Claude profile
+  amux restore <id>           restore trash (` + "`am restore --backup`" + ` = last auto-backup)
+  amux sw                     picker · am sw <id> pin Claude or provider
+  amux current [tool]         who is logged in on this machine
+  amux ls [tool]              Claude/codex profiles only (short IDs)
 
-Multi-Provider Gateway & Plugins:
-  amux login [provider] [--browser] [--token T] [--cookie C] [--refresh R] [--model M]
-                            chatgpt/claude: open browser, you log in, amux captures cookie via CDP
-                            (no Keychain). gemini-web: gemini.google.com cookies.
-                            gemini: opens AI Studio for API key paste.
-  amux doctor providers     live 1-turn probe of every pool adapter (OK/FAIL)
-  amux accounts               list multi-provider accounts in pool, sorted by priority
-  amux accounts rm <id>       remove a pool account (same as: amux api rm)
-  amux accounts off|on <id>   remove/add from rotate pool (still callable via X-Provider)
-  amux accounts priority <id> <N>
-                            set a pool account's priority (lower = tried first); hot-reloads
-                            a running proxy, no restart needed
-  amux accounts model <id> <model>
-                            change a pool account's model; hot-reloads a running proxy
+Rotate pool:
+  amux pool                   who is IN rotate
+  amux pool add <id>          include in rotate (same as am on)
+  amux pool remove <id>       exclude from rotate (same as am off)
+  amux pool priority <id> N   lower N = tried first (hot-reload)
+  amux pool model <id> M      change provider model (hot-reload)
+
+Add providers:
+  amux login <provider>       chatgpt / claude / gemini / gemini-web / github / groq
   amux api add <name> --endpoint <url> --api-key <key> [--model M] [--priority N]
-                            add OpenAI-compatible provider
-  amux api rm <name>          remove provider (alias of accounts rm)
-  amux api ls                 list provider accounts
-  amux chat [--provider <id>] [prompt]
-                            interactive terminal chat via multi-provider pool; --provider
-                            pins the session to one pool account instead of the whole pool
+  amux accounts rm <id>       delete a provider from the list (not just pool)
+  amux doctor providers       1-turn probe each adapter
+  amux chat [--provider id]   terminal chat + failover
 
-  Note: once a codex profile is logged in (amux add codex), its ChatGPT-subscription
-  token is automatically reused as an extra pool adapter (codex:NN, type codex_cli) —
-  no separate login needed. It calls an undocumented ChatGPT backend endpoint the same
-  way this CLI's other *-web adapters do, so it may break if OpenAI changes that API.
+  Codex: after am add codex, token is reused as codex:NN — no extra login.
 
-Monitoring & Utilities:
+Monitoring:
   amux update [--force] [--quiet]
                             update amux to latest version from github (keeps all accounts)
   amux usage [day|week|month|all] [-D|--detail] [-d YYYY-MM-DD] [-p PROJECT]
@@ -191,6 +177,10 @@ func Run(rawArgs []string) {
 		}
 
 	case "sw", "switch":
+		if len(args) > 0 && isProviderName(strings.Join(args, " ")) {
+			proxy.CmdSwitchProvider(strings.Join(args, " "))
+			break
+		}
 		tool, name := toolAndName(args)
 		if name == "" {
 			name = ui.PickProfile(tool)
@@ -209,28 +199,41 @@ func Run(rawArgs []string) {
 		}
 
 	case "off", "disable":
-		tool, name := toolAndName(args)
-		if name == "" {
-			die("usage: amux off <id|name>")
+		if len(args) == 0 {
+			die("usage: am off <id>")
 		}
-		resolved := resolveName(tool, name)
-		if err := profile.SetDisabled(tool, resolved, true); err != nil {
-			die("%v", err)
+		if len(args) >= 2 {
+			if _, ok := profile.LoadConfig().Tools[args[0]]; ok {
+				resolved := resolveName(args[0], strings.Join(args[1:], " "))
+				if err := profile.SetDisabled(args[0], resolved, true); err != nil {
+					die("%v", err)
+				}
+				proxy.Sync()
+				fmt.Printf("off %s/%s — out of rotate (am on %s)\n", args[0], resolved, resolved)
+				return
+			}
 		}
-		proxy.Sync()
-		fmt.Printf("off %s/%s — auto-rotate and am sw will skip it (am on %s to restore)\n", tool, resolved, resolved)
+		cmdToggleAccount(strings.Join(args, " "), false)
 
 	case "on", "enable":
-		tool, name := toolAndName(args)
-		if name == "" {
-			die("usage: amux on <id|name>")
+		if len(args) == 0 {
+			die("usage: am on <id>")
 		}
-		resolved := resolveName(tool, name)
-		if err := profile.SetDisabled(tool, resolved, false); err != nil {
-			die("%v", err)
+		if len(args) >= 2 {
+			if _, ok := profile.LoadConfig().Tools[args[0]]; ok {
+				resolved := resolveName(args[0], strings.Join(args[1:], " "))
+				if err := profile.SetDisabled(args[0], resolved, false); err != nil {
+					die("%v", err)
+				}
+				proxy.Sync()
+				fmt.Printf("on %s/%s — back in rotate\n", args[0], resolved)
+				return
+			}
 		}
-		proxy.Sync()
-		fmt.Printf("on %s/%s — available for rotate and am sw again\n", tool, resolved)
+		cmdToggleAccount(strings.Join(args, " "), true)
+
+	case "pool":
+		cmdPool(args)
 
 	case "status", "st":
 		ui.CmdStatus()
