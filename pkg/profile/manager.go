@@ -177,9 +177,27 @@ func DetectAccount(spec types.ToolSpec) string {
 		if a.AccountField == "" {
 			continue
 		}
-		b, err := os.ReadFile(a.Path)
-		if err != nil {
-			continue
+		var b []byte
+		if a.Kind == "keychain" {
+			s, err := auth.KCGet(a.Service, a.Account)
+			if err != nil {
+				continue
+			}
+			if strings.HasPrefix(s, "go-keyring-base64:") {
+				if dec, derr := base64.StdEncoding.DecodeString(s[len("go-keyring-base64:"):]); derr == nil {
+					b = dec
+				} else {
+					b = []byte(s)
+				}
+			} else {
+				b = []byte(s)
+			}
+		} else {
+			data, err := os.ReadFile(a.Path)
+			if err != nil {
+				continue
+			}
+			b = data
 		}
 		if strings.HasPrefix(a.AccountField, "jwt:") {
 			parts := strings.Split(a.AccountField[4:], ":")
@@ -226,6 +244,12 @@ func parseJWTEmail(tok, field string) string {
 		seg += strings.Repeat("=", 4-m)
 	}
 	payload, err := base64.URLEncoding.DecodeString(seg)
+	if err != nil {
+		payload, err = base64.RawURLEncoding.DecodeString(seg)
+	}
+	if err != nil {
+		payload, err = base64.StdEncoding.DecodeString(seg)
+	}
 	if err != nil {
 		return ""
 	}

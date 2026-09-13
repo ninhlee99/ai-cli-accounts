@@ -13,10 +13,10 @@ import (
 )
 
 const (
-	maxEventLines   = 2000
-	maxRequestLines = 500
-	previewRunes    = 240
-	outputRunes     = 64000
+	maxEventLines   = 1000
+	maxRequestLines = 200
+	previewRunes    = 120
+	outputRunes     = 200
 )
 
 var (

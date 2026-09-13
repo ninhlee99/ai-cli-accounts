@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"amux-accounts/pkg/profile"
@@ -94,6 +95,8 @@ func cmdPool(args []string) {
 	switch args[0] {
 	case "ls", "list":
 		ui.CmdPool()
+	case "set":
+		cmdPoolSet(args[1:])
 	case "add":
 		if len(args) < 2 {
 			die("usage: am pool add <id>")
@@ -109,6 +112,73 @@ func cmdPool(args []string) {
 	case "model":
 		ui.CmdAccountsCmd(args)
 	default:
-		die("usage: am pool [add|remove|priority|model] …")
+		die("usage: am pool [set <id> [--priority N] [--model M] [--on|--off] | add|remove|priority|model] …")
 	}
 }
+
+func cmdPoolSet(args []string) {
+	if len(args) == 0 {
+		die("usage: am pool set <id> [--priority <N>] [--model <model>] [--on|--off]")
+	}
+	id := args[0]
+	var priority *int
+	var model *string
+	var toggle *bool
+
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "--priority", "-p":
+			if i+1 < len(args) {
+				n, err := strconv.Atoi(args[i+1])
+				if err != nil {
+					die("invalid priority %q: %v", args[i+1], err)
+				}
+				priority = &n
+				i++
+			}
+		case "--model", "-m":
+			if i+1 < len(args) {
+				m := args[i+1]
+				model = &m
+				i++
+			}
+		case "--on", "--enable":
+			t := true
+			toggle = &t
+		case "--off", "--disable":
+			t := false
+			toggle = &t
+		}
+	}
+
+	ref, err := resolveAccount(id)
+	if err != nil {
+		die("%v", err)
+	}
+
+	accPath := provider.DefaultAccountsPath()
+	if priority != nil {
+		if err := provider.SetPriority(accPath, ref.id, *priority); err != nil {
+			die("set priority: %v", err)
+		}
+		fmt.Printf("set %s priority -> %d\n", ref.id, *priority)
+	}
+	if model != nil {
+		if err := provider.SetModel(accPath, ref.id, *model); err != nil {
+			die("set model: %v", err)
+		}
+		fmt.Printf("set %s model -> %s\n", ref.id, *model)
+	}
+	if toggle != nil {
+		if err := applyAccountEnabled(ref, *toggle); err != nil {
+			die("toggle account: %v", err)
+		}
+		word := "off"
+		if *toggle {
+			word = "on"
+		}
+		fmt.Printf("%s %s\n", word, ref.id)
+	}
+	proxy.Sync()
+}
+

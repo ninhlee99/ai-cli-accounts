@@ -50,19 +50,31 @@ func PrintEnvExports(proxyUp bool, hasProfiles bool, proxyBase string) {
 	if proxyUp {
 		fmt.Printf("export ANTHROPIC_BASE_URL=%s\n", proxyBase)
 		fmt.Printf("export ANTHROPIC_AUTH_TOKEN=am-proxy\n")
+		fmt.Printf("export GEMINI_API_BASE=%s\n", proxyBase)
+		fmt.Printf("export GOOGLE_GENAI_BASE_URL=%s\n", proxyBase)
+		fmt.Printf("alias agy='am run agy'\n")
+		fmt.Printf("alias antigravity='am run antigravity'\n")
 	} else {
 		// A shell that already ran `eval "$(am env)"` while the proxy was up
 		// has these exported in its live session. Omitting the line here
 		// (old behavior) left them stale once the proxy went down — the
 		// shell kept pointing at a dead port instead of falling through to
-		// api.anthropic.com. Unset explicitly, unless the user has their own
-		// override for these names via `am env set`.
+		// api.anthropic.com or upstream Google. Unset explicitly, unless the
+		// user has their own override for these names via `am env set`.
 		if _, ok := m["ANTHROPIC_BASE_URL"]; !ok {
 			fmt.Printf("unset ANTHROPIC_BASE_URL\n")
 		}
 		if _, ok := m["ANTHROPIC_AUTH_TOKEN"]; !ok {
 			fmt.Printf("unset ANTHROPIC_AUTH_TOKEN\n")
 		}
+		if _, ok := m["GEMINI_API_BASE"]; !ok {
+			fmt.Printf("unset GEMINI_API_BASE\n")
+		}
+		if _, ok := m["GOOGLE_GENAI_BASE_URL"]; !ok {
+			fmt.Printf("unset GOOGLE_GENAI_BASE_URL\n")
+		}
+		fmt.Printf("unalias agy 2>/dev/null || true\n")
+		fmt.Printf("unalias antigravity 2>/dev/null || true\n")
 	}
 
 	names := make([]string, 0, len(m))
@@ -72,10 +84,7 @@ func PrintEnvExports(proxyUp bool, hasProfiles bool, proxyBase string) {
 	sort.Strings(names)
 	for _, k := range names {
 		// Don't override the gateway token we just set for the live proxy.
-		if proxyUp && k == "ANTHROPIC_AUTH_TOKEN" {
-			continue
-		}
-		if proxyUp && k == "ANTHROPIC_BASE_URL" {
+		if proxyUp && (k == "ANTHROPIC_AUTH_TOKEN" || k == "ANTHROPIC_BASE_URL" || k == "GEMINI_API_BASE" || k == "GOOGLE_GENAI_BASE_URL") {
 			continue
 		}
 		fmt.Printf("export %s=%s\n", k, ShellQuote(m[k]))

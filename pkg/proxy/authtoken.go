@@ -86,7 +86,7 @@ func isLoopback(r *http.Request) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// requestToken extracts the bearer token from X-Am-Token, X-Api-Key, api-key, or Authorization.
+// requestToken extracts the bearer token from X-Am-Token, X-Api-Key, x-goog-api-key, api-key, Authorization, or ?key=.
 func requestToken(r *http.Request) string {
 	if t := strings.TrimSpace(r.Header.Get("X-Am-Token")); t != "" {
 		return t
@@ -94,11 +94,17 @@ func requestToken(r *http.Request) string {
 	if t := strings.TrimSpace(r.Header.Get("X-Api-Key")); t != "" {
 		return t
 	}
+	if t := strings.TrimSpace(r.Header.Get("x-goog-api-key")); t != "" {
+		return t
+	}
 	if t := strings.TrimSpace(r.Header.Get("api-key")); t != "" {
 		return t
 	}
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 		return strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+	}
+	if key := strings.TrimSpace(r.URL.Query().Get("key")); key != "" {
+		return key
 	}
 	return ""
 }

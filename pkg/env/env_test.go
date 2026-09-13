@@ -29,6 +29,12 @@ func TestPrintEnvExports_ProxyUpIncludesGatewayCreds(t *testing.T) {
 	if !strings.Contains(out, "export ANTHROPIC_AUTH_TOKEN=am-proxy\n") {
 		t.Fatalf("missing AUTH_TOKEN: %q", out)
 	}
+	if !strings.Contains(out, "export GEMINI_API_BASE=http://127.0.0.1:8787\n") {
+		t.Fatalf("missing GEMINI_API_BASE: %q", out)
+	}
+	if !strings.Contains(out, "export GOOGLE_GENAI_BASE_URL=http://127.0.0.1:8787\n") {
+		t.Fatalf("missing GOOGLE_GENAI_BASE_URL: %q", out)
+	}
 	if !strings.Contains(out, "export FOO='bar'\n") {
 		t.Fatalf("missing custom env: %q", out)
 	}
@@ -47,15 +53,21 @@ func TestPrintEnvExports_ProxyDownUnsetsAnthropic(t *testing.T) {
 	out := buf.String()
 	// A shell that ran `eval "$(am env)"` while the proxy was up has these
 	// exported live — omitting the line (old behavior) left them stale.
-	// Must unset explicitly so the shell falls through to api.anthropic.com.
+	// Must unset explicitly so the shell falls through to api.anthropic.com or upstream Google.
 	if !strings.Contains(out, "unset ANTHROPIC_BASE_URL\n") {
 		t.Fatalf("missing unset BASE_URL: %q", out)
 	}
 	if !strings.Contains(out, "unset ANTHROPIC_AUTH_TOKEN\n") {
 		t.Fatalf("missing unset AUTH_TOKEN: %q", out)
 	}
-	if strings.Contains(out, "export ANTHROPIC_") {
-		t.Fatalf("should not export Anthropic vars when proxy down: %q", out)
+	if !strings.Contains(out, "unset GEMINI_API_BASE\n") {
+		t.Fatalf("missing unset GEMINI_API_BASE: %q", out)
+	}
+	if !strings.Contains(out, "unset GOOGLE_GENAI_BASE_URL\n") {
+		t.Fatalf("missing unset GOOGLE_GENAI_BASE_URL: %q", out)
+	}
+	if strings.Contains(out, "export ANTHROPIC_") || strings.Contains(out, "export GEMINI_") {
+		t.Fatalf("should not export gateway vars when proxy down: %q", out)
 	}
 }
 

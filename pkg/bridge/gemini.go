@@ -171,7 +171,7 @@ func geminiBodyToChatRequest(model string, stream bool, body []byte) (*types.Cha
 					args = string(p.FunctionCall.Args)
 				}
 				calls = append(calls, types.ToolCall{
-					ID:        fmt.Sprintf("call_%s_%d", p.FunctionCall.Name, time.Now().UnixNano()),
+					ID:        fmt.Sprintf("call_%s_%d_%d", p.FunctionCall.Name, time.Now().UnixNano(), len(calls)+1),
 					Name:      p.FunctionCall.Name,
 					Arguments: args,
 				})
@@ -429,5 +429,60 @@ func HandleGeminiGenerateContent(w http.ResponseWriter, r *http.Request, pool *r
 	_ = json.NewEncoder(w).Encode(respObj)
 	recordChatUsage(r, pool, req.Model, inTokens, outTokens)
 	logChatRequest(r, pool, req, pickLogOutput(fullContent.String(), logText), finishReason, "", inTokens, outTokens, started, toolCalls)
+}
+
+// HandleGeminiCountTokens handles /models/...:countTokens requests for Antigravity & Gemini SDKs.
+func HandleGeminiCountTokens(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	model, _ := parseGeminiModelAndStream(r.URL.Path, r.URL.RawQuery)
+	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
+	if err != nil {
+		http.Error(w, "failed to read body", http.StatusBadRequest)
+		return
+	}
+	req, err := geminiBodyToChatRequest(model, false, body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("invalid json: %v", err), http.StatusBadRequest)
+		return
+	}
+	tokens := estimateInputTokens(req)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]int{
+		"totalTokens": tokens,
+	})
+}
+
+// HandleGeminiModels lists available models in Google Gemini API format.
+func HandleGeminiModels(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	models := []string{
+		"gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
+		"gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low",
+		"gemini-3.6-flash", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite",
+		"gemini-3.1-pro-preview",
+	}
+	type geminiModelItem struct {
+		Name                       string   `json:"name"`
+		DisplayName                string   `json:"displayName,omitempty"`
+		InputTokenLimit            int      `json:"inputTokenLimit,omitempty"`
+		OutputTokenLimit           int      `json:"outputTokenLimit,omitempty"`
+		SupportedGenerationMethods []string `json:"supportedGenerationMethods,omitempty"`
+	}
+	items := make([]geminiModelItem, 0, len(models))
+	for _, m := range models {
+		items = append(items, geminiModelItem{
+			Name:                       "models/" + m,
+			DisplayName:                m,
+			InputTokenLimit:            1048576,
+			OutputTokenLimit:           8192,
+			SupportedGenerationMethods: []string{"generateContent", "countTokens"},
+		})
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"models": items,
+	})
 }
 

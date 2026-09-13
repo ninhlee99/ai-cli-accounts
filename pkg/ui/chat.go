@@ -164,7 +164,7 @@ func runClaudeTurn(pool *router.AccountPoolRouter, history *[]types.ChatMessage,
 			Time: time.Now(), Dialect: "chat", Account: pool.LastUsed(),
 			Input: prompt, Error: err.Error(), DurationMs: time.Since(started).Milliseconds(),
 		})
-		monitor.AppendFullIO(monitor.FullIO{
+		monitor.RecordErrorDiagnostic(monitor.ErrorDiagnostic{
 			Time: time.Now(), Account: pool.LastUsed(), Dialect: "chat",
 			Error: err.Error(), DurationMs: time.Since(started).Milliseconds(),
 			Messages: []types.ChatMessage{{Role: "user", Content: prompt}},
@@ -237,7 +237,7 @@ func runClaudeTurn(pool *router.AccountPoolRouter, history *[]types.ChatMessage,
 		Error:      streamErr,
 		StopReason: "end_turn",
 	})
-	monitor.AppendFullIO(monitor.FullIO{
+	monitor.RecordErrorDiagnostic(monitor.ErrorDiagnostic{
 		Time:       time.Now(),
 		Account:    who,
 		Dialect:    "chat",

@@ -19,6 +19,7 @@ import (
 	"amux-accounts/pkg/env"
 	"amux-accounts/pkg/hook"
 	"amux-accounts/pkg/monitor"
+	"amux-accounts/pkg/privacy"
 	"amux-accounts/pkg/profile"
 	"amux-accounts/pkg/provider"
 	"amux-accounts/pkg/proxy"
@@ -45,15 +46,16 @@ Accounts:
   amux off <id>               take any account out of rotate (stays in list)
   amux on <id>                put it back
   amux add [tool] [name]      save current CLI login (claude / codex / gemini)
-  amux rm <id|name>           delete Claude profile → trash
+  amux rm <id|name>           delete account (CLI profile → trash, provider → removed)
   amux rename <id> <new>      rename Claude profile
   amux restore <id>           restore trash (` + "`am restore --backup`" + ` = last auto-backup)
   amux sw                     picker · am sw <id> pin Claude or provider
   amux current [tool]         who is logged in on this machine
-  amux ls [tool]              Claude/codex profiles only (short IDs)
+  amux ls [tool]              alias to amux accounts
 
 Rotate pool:
   amux pool                   who is IN rotate
+  amux pool set <id> [flags]  set account options (--priority N, --model M, --on, --off)
   amux pool add <id>          include in rotate (same as am on)
   amux pool remove <id>       exclude from rotate (same as am off)
   amux pool priority <id> N   lower N = tried first (hot-reload)
@@ -62,18 +64,20 @@ Rotate pool:
 Add providers:
   amux login <provider>       chatgpt / claude / gemini / gemini-web / github / groq
   amux api add <name> --endpoint <url> --api-key <key> [--model M] [--priority N]
-  amux accounts rm <id>       delete a provider from the list (not just pool)
+  amux accounts rm <id>       delete a provider from the list (or use am rm <id>)
   amux doctor providers       1-turn probe each adapter
   amux chat [--provider id]   terminal chat + failover
 
   Codex: after am add codex, token is reused as codex:NN — no extra login.
 
-Monitoring:
+Monitoring & Utilities:
   amux update [--force] [--quiet]
                             update amux to latest version from github (keeps all accounts)
   amux usage [day|week|month|all] [-D|--detail] [-d YYYY-MM-DD] [-p PROJECT]
                             token usage analytics
-  amux run <tool> [args...]   exec tool (currently: claude) routed through the proxy
+  amux logs [--count] [--errors] [--clean]
+                            log statistics, errors, and 7-day retention cleanup
+  amux run <tool> [args...]   exec tool (claude / agy / antigravity) routed through the proxy
   amux proxy [up|down|token] [--public] [-b|--addr HOST] [-p|--port N] [--threshold N]
                             run/manage proxy daemon (default 127.0.0.1:8787;
                             --public binds 0.0.0.0; -p/--port overrides port)
@@ -86,7 +90,7 @@ Monitoring:
   amux hook [install|uninstall|status]
   amux export [tool] [name..] [-o file|--stdout]  encrypted profile bundle
   amux import [-f file] [--activate tool=name]
-  amux feedback               file a GitHub issue for bugs or ideas
+  amux feedback [--error]     file a GitHub issue for bugs or errors (privacy sanitized)
 `)
 }
 
@@ -146,9 +150,22 @@ func Run(rawArgs []string) {
 		cmdLs(args)
 
 	case "rm", "remove", "delete":
+		target := strings.Join(args, " ")
+		if target == "" {
+			die("usage: amux rm [tool] <name>   (account ID, name, or provider ID)")
+		}
+		if id, err := provider.MatchID(provider.DefaultAccountsPath(), target); err == nil {
+			cmdRm("", id)
+			return
+		}
 		tool, name := toolAndName(args)
 		if name == "" {
-			die("usage: amux rm [tool] <name>   (name, ID, or part of the email)")
+			name = tool
+			tool = "claude"
+		}
+		if id, err := provider.MatchID(provider.DefaultAccountsPath(), name); err == nil {
+			cmdRm("", id)
+			return
 		}
 		cmdRm(tool, resolveName(tool, name))
 
@@ -279,6 +296,9 @@ func Run(rawArgs []string) {
 	case "usage":
 		usage.PrintUsageReport(args)
 
+	case "logs", "log":
+		cmdLogs(args)
+
 	case "run":
 		cmdRun(args)
 
@@ -331,24 +351,31 @@ func Run(rawArgs []string) {
 		}
 
 	case "hook":
-		sub := "status"
+		sub := ""
 		if len(args) > 0 {
-			sub = args[0]
+			sub = strings.ToLower(args[0])
 		}
 		switch sub {
 		case "install":
-			cmdHookInstall()
+			cmdHookInstall(args[1:])
 		case "uninstall", "remove":
-			n, err := hook.HookUninstall()
-			if err != nil {
-				die("hook uninstall: %v", err)
-			}
-			fmt.Printf("removed %d hook entr%s from %s\n", n, plural(n, "y", "ies"), hook.ClaudeSettingsPath())
-			fmt.Println("also remove the `eval \"$(am env)\"` line from your shell rc if you added it.")
+			cmdHookUninstall(args[1:])
 		case "status":
-			cmdHookStatus()
+			cmdHookStatus(args[1:])
+		case "claude":
+			cmdHookTool("claude", args[1:])
+		case "agy", "antigravity":
+			cmdHookTool("agy", args[1:])
+		case "codex":
+			cmdHookTool("codex", args[1:])
+		case "cursor":
+			cmdHookTool("cursor", args[1:])
+		case "agy-start":
+			cmdHookTool("agy", []string{"start"})
+		case "agy-stop":
+			cmdHookTool("agy", []string{"stop"})
 		default:
-			die("amux hook: install | uninstall | status")
+			die("amux hook: [claude | agy | codex | cursor] | install | uninstall | status")
 		}
 
 	case "proxy":
@@ -635,8 +662,26 @@ func loginHint(tool string) {
 }
 
 func cmdRm(tool, name string) {
+	target := name
+	if target == "" {
+		target = tool
+	}
+	// Support deleting pool providers seamlessly via am rm <id>
+	if id, err := provider.MatchID(provider.DefaultAccountsPath(), target); err == nil {
+		if !confirm(fmt.Sprintf("delete provider %s from accounts list?", id)) {
+			fmt.Println("kept.")
+			return
+		}
+		if err := provider.RemoveProvider(provider.DefaultAccountsPath(), id); err != nil {
+			die("remove provider failed: %v", err)
+		}
+		proxy.Sync()
+		fmt.Printf("Removed provider %q from accounts\n", id)
+		return
+	}
+
 	if _, err := os.Stat(profile.BundlePath(tool, name)); err != nil {
-		die("no profile %s/%s", tool, name)
+		die("no account or provider matching %q (see: am accounts)", name)
 	}
 	m := profile.ReadMeta(tool, name)
 	if !confirm(fmt.Sprintf("delete %s (%s)?", name, orDash(m.Account))) {
@@ -648,6 +693,60 @@ func cmdRm(tool, name string) {
 		die("remove failed: %v", err)
 	}
 	fmt.Printf("moved to trash — restore with: am restore %s\n", name)
+}
+
+func cmdLogs(args []string) {
+	showErrors := false
+	clean := false
+	for _, a := range args {
+		switch a {
+		case "-e", "--error", "--errors":
+			showErrors = true
+		case "-c", "--clean", "--prune":
+			clean = true
+		}
+	}
+
+	if clean {
+		removed, err := monitor.PruneLogs(7 * 24 * time.Hour)
+		if err != nil {
+			die("prune logs failed: %v", err)
+		}
+		fmt.Printf("Pruned %d log entries older than 7 days.\n", removed)
+		return
+	}
+
+	if showErrors {
+		errLog, found := monitor.GetLatestErrorLog()
+		if !found || strings.TrimSpace(errLog) == "" {
+			fmt.Println("No error logs found.")
+			return
+		}
+		fmt.Println("=== Latest Error Log ===")
+		fmt.Println(errLog)
+		return
+	}
+
+	st := monitor.GetLogStats()
+	lastErr := st.LastError
+	if lastErr == "" {
+		lastErr = "none"
+	}
+	if len(lastErr) > 36 {
+		lastErr = lastErr[:33] + "..."
+	}
+
+	fmt.Println()
+	fmt.Println("  +-- AMUX LOG STATS --------------------------------------+")
+	fmt.Printf("  |total requests : %-39d|\n", st.TotalRequests)
+	fmt.Printf("  |total errors   : %-39d|\n", st.TotalErrors)
+	fmt.Printf("  |last error     : %-39s|\n", lastErr)
+	fmt.Println("  |retention      : 7 days (auto-pruned)                   |")
+	fmt.Println("  +--------------------------------------------------------+")
+	fmt.Println("  am logs --errors    view latest error details")
+	fmt.Println("  am logs --clean     prune logs older than 7 days")
+	fmt.Println("  am feedback --error create GitHub issue from error log")
+	fmt.Println()
 }
 
 func confirm(prompt string) bool {
@@ -707,23 +806,49 @@ func cmdRun(args []string) {
 	}
 	tool := args[0]
 	rest := args[1:]
-	if tool != "claude" {
-		die("amux run currently supports: claude")
+	if !proxy.ProxyUp() {
+		proxy.CmdProxyUpFlags(proxy.UpFlags{})
 	}
 	base := proxy.ProxyBase()
-	if !proxy.ProxyUp() {
-		die("proxy not reachable at %s (start it with: am proxy)", base)
+
+	var bin string
+	var execArgs []string
+	var environ []string
+
+	switch tool {
+	case "claude":
+		var err error
+		bin, err = exec.LookPath(tool)
+		if err != nil {
+			die("%v", err)
+		}
+		execArgs = append([]string{tool}, rest...)
+		environ = append(os.Environ(),
+			"ANTHROPIC_BASE_URL="+base,
+			"ANTHROPIC_AUTH_TOKEN=am-proxy",
+			"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+		)
+	case "agy", "antigravity":
+		target := tool
+		var err error
+		bin, err = exec.LookPath(target)
+		if err != nil && tool == "antigravity" {
+			target = "agy"
+			bin, err = exec.LookPath(target)
+		}
+		if err != nil {
+			die("%v", err)
+		}
+		execArgs = append([]string{target}, rest...)
+		environ = append(os.Environ(),
+			"GEMINI_API_BASE="+base,
+			"GOOGLE_GENAI_BASE_URL="+base,
+		)
+	default:
+		die("amux run currently supports: claude, agy, antigravity")
 	}
-	environ := append(os.Environ(),
-		"ANTHROPIC_BASE_URL="+base,
-		"ANTHROPIC_AUTH_TOKEN=am-proxy",
-		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
-	)
-	bin, err := exec.LookPath(tool)
-	if err != nil {
-		die("%v", err)
-	}
-	_ = syscall.Exec(bin, append([]string{tool}, rest...), environ)
+
+	_ = syscall.Exec(bin, execArgs, environ)
 }
 
 func cmdSetup(args []string) {
@@ -738,8 +863,8 @@ func cmdSetup(args []string) {
 		}
 	}
 
-	fmt.Println("== Setting up Claude Code hook ==")
-	cmdHookInstall()
+	fmt.Println("== Setting up AI CLI hooks (Claude, AGY, Codex, Cursor) ==")
+	cmdHookInstall(nil)
 
 	fmt.Println("\n== Installing /am:feedback slash command ==")
 	if err := hook.InstallSlashCommand("feedback.md", []byte(hook.FeedbackSlashCommandContent)); err != nil {
@@ -765,11 +890,83 @@ func cmdSetup(args []string) {
 	fmt.Println("\nsetup done. Open a new shell, then: amux add   (save your first account)")
 }
 
-func cmdHookInstall() {
-	if err := hook.HookInstall(); err != nil {
-		die("hook install: %v", err)
+func cmdHookInstall(args []string) {
+	var target string
+	if len(args) > 0 {
+		target = hook.CanonicalTool(args[0])
+		if target == "" {
+			die("unknown tool/ide %q (supported: claude, agy, codex, cursor)", args[0])
+		}
 	}
-	fmt.Printf("installed hooks in %s\n  SessionStart -> amux proxy up\n  SessionEnd   -> amux proxy down\n  Stop         -> amux proxy down\n\n", hook.ClaudeSettingsPath())
+
+	installClaude := false
+	installAgy := false
+	installCodex := false
+	installCursor := false
+
+	if target != "" {
+		switch target {
+		case "claude":
+			installClaude = true
+		case "agy":
+			installAgy = true
+		case "codex":
+			installCodex = true
+		case "cursor":
+			installCursor = true
+		}
+	} else {
+		installClaude = hook.ClaudeAvailable()
+		installAgy = hook.GeminiAvailable()
+		installCodex = hook.CodexAvailable()
+		installCursor = hook.CursorAvailable()
+
+		if !installClaude && !installAgy && !installCodex && !installCursor {
+			installClaude = true
+		}
+	}
+
+	installedCount := 0
+
+	if installClaude {
+		if err := hook.HookInstall(); err != nil {
+			die("hook install (claude): %v", err)
+		}
+		fmt.Printf("installed hooks in %s\n  SessionStart -> amux hook claude start\n  SessionEnd   -> amux hook claude stop\n  Stop         -> amux hook claude stop\n\n", hook.ClaudeSettingsPath())
+		installedCount++
+	}
+
+	if installAgy {
+		if err := hook.GeminiHookInstall(); err != nil {
+			fmt.Printf("warning: antigravity hook install: %v\n", err)
+		} else {
+			fmt.Printf("installed hooks in %s\n  SessionStart  -> amux hook agy start\n  PreInvocation -> amux hook agy start\n  Stop          -> amux hook agy stop\n\n", hook.GeminiHooksPath())
+			installedCount++
+		}
+	}
+
+	if installCodex {
+		if err := hook.CodexHookInstall(); err != nil {
+			fmt.Printf("warning: codex hook install: %v\n", err)
+		} else {
+			fmt.Printf("installed hooks in %s\n  SessionStart  -> amux hook codex start\n\n", hook.CodexHooksPath())
+			installedCount++
+		}
+	}
+
+	if installCursor {
+		if err := hook.CursorHookInstall(); err != nil {
+			fmt.Printf("warning: cursor hook install: %v\n", err)
+		} else {
+			fmt.Printf("installed hooks in %s\n  sessionStart  -> amux hook cursor start\n\n", hook.CursorHooksPath())
+			installedCount++
+		}
+	}
+
+	if installedCount == 0 {
+		fmt.Println("no supported IDE/CLI found on this system.")
+		return
+	}
 
 	// GUI-launched clients (Dock icon, IDE integration) never source shell
 	// rc, so they'd miss ANTHROPIC_BASE_URL even with the rc line below —
@@ -777,9 +974,9 @@ func cmdHookInstall() {
 	proxyUp := proxy.ProxyUp()
 	hook.SyncLaunchctlEnv(proxyUp, proxy.ProxyBase())
 	if proxyUp {
-		fmt.Println("launchctl: mirrored ANTHROPIC_BASE_URL into macOS session env (proxy up)")
+		fmt.Println("launchctl: mirrored ANTHROPIC_BASE_URL & GEMINI_API_BASE into macOS session env (proxy up)")
 	} else {
-		fmt.Println("launchctl: cleared ANTHROPIC_BASE_URL from macOS session env (proxy not running — GUI apps will use the real Anthropic API)")
+		fmt.Println("launchctl: cleared gateway vars from macOS session env (proxy not running)")
 	}
 
 	line := `eval "$(am env)"`
@@ -797,7 +994,7 @@ func cmdHookInstall() {
 	r := bufio.NewReader(os.Stdin)
 	ans, _ := r.ReadString('\n')
 	if strings.EqualFold(strings.TrimSpace(ans), "y") {
-		if err := hook.AppendLine(rc, "\n# amux-accounts: route claude through the rotating proxy\n"+line+"\n"); err != nil {
+		if err := hook.AppendLine(rc, "\n# amux-accounts: route AI coding tools through the rotating proxy\n"+line+"\n"); err != nil {
 			fmt.Printf("append failed: %v\n", err)
 			return
 		}
@@ -807,15 +1004,129 @@ func cmdHookInstall() {
 	fmt.Println("then open a new shell.")
 }
 
-func cmdHookStatus() {
-	events := hook.InstalledEvents()
-	if len(events) == 0 {
-		fmt.Println("hooks: not installed  (amux hook install)")
-	} else {
-		for _, ev := range events {
-			fmt.Printf("hook: %s -> amux proxy\n", ev)
+func cmdHookUninstall(args []string) {
+	var target string
+	if len(args) > 0 {
+		target = hook.CanonicalTool(args[0])
+		if target == "" {
+			die("unknown tool/ide %q (supported: claude, agy, codex, cursor)", args[0])
 		}
 	}
+
+	unClaude := false
+	unAgy := false
+	unCodex := false
+	unCursor := false
+
+	if target != "" {
+		switch target {
+		case "claude":
+			unClaude = true
+		case "agy":
+			unAgy = true
+		case "codex":
+			unCodex = true
+		case "cursor":
+			unCursor = true
+		}
+	} else {
+		unClaude = hook.ClaudeAvailable() || hook.HookInstalled()
+		unAgy = hook.GeminiAvailable() || hook.GeminiHookInstalled()
+		unCodex = hook.CodexAvailable() || hook.CodexHookInstalled()
+		unCursor = hook.CursorAvailable() || hook.CursorHookInstalled()
+	}
+
+	if unClaude {
+		n, err := hook.HookUninstall()
+		if err != nil {
+			die("hook uninstall (claude): %v", err)
+		}
+		if n > 0 || target != "" {
+			fmt.Printf("removed %d hook entr%s from %s\n", n, plural(n, "y", "ies"), hook.ClaudeSettingsPath())
+		}
+	}
+	if unAgy {
+		n, err := hook.GeminiHookUninstall()
+		if err != nil {
+			die("hook uninstall (antigravity): %v", err)
+		}
+		if n > 0 || target != "" {
+			fmt.Printf("removed %d hook entr%s from %s\n", n, plural(n, "y", "ies"), hook.GeminiHooksPath())
+		}
+	}
+	if unCodex {
+		n, err := hook.CodexHookUninstall()
+		if err != nil {
+			die("hook uninstall (codex): %v", err)
+		}
+		if n > 0 || target != "" {
+			fmt.Printf("removed %d hook entr%s from %s\n", n, plural(n, "y", "ies"), hook.CodexHooksPath())
+		}
+	}
+	if unCursor {
+		n, err := hook.CursorHookUninstall()
+		if err != nil {
+			die("hook uninstall (cursor): %v", err)
+		}
+		if n > 0 || target != "" {
+			fmt.Printf("removed %d hook entr%s from %s\n", n, plural(n, "y", "ies"), hook.CursorHooksPath())
+		}
+	}
+	fmt.Println("also remove the `eval \"$(am env)\"` line from your shell rc if you added it.")
+}
+
+func cmdHookStatus(args []string) {
+	var target string
+	if len(args) > 0 {
+		target = hook.CanonicalTool(args[0])
+		if target == "" {
+			die("unknown tool/ide %q (supported: claude, agy, codex, cursor)", args[0])
+		}
+	}
+
+	showClaude := target == "claude" || (target == "" && (hook.ClaudeAvailable() || hook.HookInstalled()))
+	showAgy := target == "agy" || (target == "" && (hook.GeminiAvailable() || hook.GeminiHookInstalled()))
+	showCodex := target == "codex" || (target == "" && (hook.CodexAvailable() || hook.CodexHookInstalled()))
+	showCursor := target == "cursor" || (target == "" && (hook.CursorAvailable() || hook.CursorHookInstalled()))
+
+	if showClaude {
+		events := hook.InstalledEvents()
+		if len(events) == 0 {
+			fmt.Println("claude hooks: not installed")
+		} else {
+			for _, ev := range events {
+				fmt.Printf("claude hook: %s -> amux hook claude\n", ev)
+			}
+		}
+	}
+
+	if showAgy {
+		geminiEvents := hook.GeminiInstalledEvents()
+		if len(geminiEvents) == 0 {
+			fmt.Println("agy hooks: not installed")
+		} else {
+			for _, ev := range geminiEvents {
+				fmt.Printf("agy hook: %s -> amux hook agy\n", ev)
+			}
+		}
+	}
+
+	if showCodex {
+		if hook.CodexHookInstalled() {
+			fmt.Println("codex hook: SessionStart -> amux hook codex")
+		} else {
+			fmt.Println("codex hooks: not installed")
+		}
+	}
+
+	if showCursor {
+		if hook.CursorHookInstalled() {
+			fmt.Println("cursor hook: sessionStart -> amux hook cursor")
+		} else {
+			fmt.Println("cursor hooks: not installed")
+		}
+	}
+
 	switch os.Getenv("ANTHROPIC_BASE_URL") {
 	case proxy.ProxyBase():
 		fmt.Printf("ANTHROPIC_BASE_URL: %s\n", proxy.ProxyBase())
@@ -824,10 +1135,57 @@ func cmdHookStatus() {
 	default:
 		fmt.Printf("ANTHROPIC_BASE_URL: %s  (not the proxy)\n", os.Getenv("ANTHROPIC_BASE_URL"))
 	}
+
+	switch os.Getenv("GEMINI_API_BASE") {
+	case proxy.ProxyBase():
+		fmt.Printf("GEMINI_API_BASE: %s\n", proxy.ProxyBase())
+	case "":
+		fmt.Println("GEMINI_API_BASE: not set — agy may bypass the proxy unless run via `am run agy`")
+	default:
+		fmt.Printf("GEMINI_API_BASE: %s  (not the proxy)\n", os.Getenv("GEMINI_API_BASE"))
+	}
+
 	if proxy.ProxyUp() {
 		fmt.Println("proxy: running")
 	} else {
-		fmt.Println("proxy: not running (normal when no claude session is open)")
+		fmt.Println("proxy: not running (normal when no session is open)")
+	}
+}
+
+func cmdHookTool(tool string, args []string) {
+	op := "start"
+	if len(args) > 0 {
+		op = strings.ToLower(args[0])
+	}
+
+	isAgy := tool == "agy" || tool == "antigravity"
+
+	switch op {
+	case "stop", "down", "end", "session-end":
+		proxy.RegisterSession(os.Getppid(), "end")
+		if isAgy {
+			fmt.Println("{}")
+		}
+	default:
+		origStdout := os.Stdout
+		var w *os.File
+		var r *os.File
+		if isAgy {
+			r, w, _ = os.Pipe()
+			os.Stdout = w
+		}
+
+		if !proxy.ProxyUp() {
+			proxy.CmdProxyUpFlags(proxy.UpFlags{})
+		}
+		proxy.RegisterSession(os.Getppid(), "start")
+
+		if isAgy {
+			_ = w.Close()
+			os.Stdout = origStdout
+			_ = r.Close()
+			fmt.Println("{}")
+		}
 	}
 }
 
@@ -840,6 +1198,7 @@ func plural(n int, one, many string) string {
 
 func cmdFeedback(args []string) {
 	kind := "bug"
+	fromError := false
 	var titleWords []string
 	for _, a := range args {
 		switch a {
@@ -847,11 +1206,48 @@ func cmdFeedback(args []string) {
 			kind = "bug"
 		case "-i", "--idea":
 			kind = "idea"
+		case "-e", "--error", "--latest-error":
+			fromError = true
+			kind = "bug"
 		default:
 			titleWords = append(titleWords, a)
 		}
 	}
+
 	title := strings.Join(titleWords, " ")
+	var body string
+
+	if fromError {
+		errLog, found := monitor.GetLatestErrorLog()
+		if !found || strings.TrimSpace(errLog) == "" {
+			fmt.Println("amux: no error logs found to report.")
+			return
+		}
+		// Security layer: redact all sensitive info from error log before filing
+		cleanErr, res := privacy.RedactString(errLog)
+		if home := os.Getenv("HOME"); home != "" {
+			cleanErr = strings.ReplaceAll(cleanErr, home, "~")
+		}
+		if title == "" {
+			st := monitor.GetLogStats()
+			if st.LastError != "" {
+				firstLine := strings.Split(st.LastError, "\n")[0]
+				title = fmt.Sprintf("[Bug Report] %s", firstLine)
+			} else {
+				title = "[Bug Report] Gateway error observed"
+			}
+		}
+		var errB strings.Builder
+		errB.WriteString("### Error Details (Sanitized)\n\n```\n")
+		errB.WriteString(cleanErr)
+		errB.WriteString("\n```\n\n")
+		if res.Len() > 0 {
+			errB.WriteString(fmt.Sprintf("> *Privacy filter: %s*\n\n", res.Summary()))
+		}
+		body = errB.String()
+		fmt.Println("Extracted and sanitized latest error from log.")
+	}
+
 	if title == "" {
 		fmt.Print("short title for the issue: ")
 		r := bufio.NewReader(os.Stdin)
@@ -862,17 +1258,19 @@ func cmdFeedback(args []string) {
 		}
 	}
 
-	fmt.Println("describe what happened / what you'd like — blank line to finish:")
-	sc := bufio.NewScanner(os.Stdin)
-	var lines []string
-	for sc.Scan() {
-		l := sc.Text()
-		if strings.TrimSpace(l) == "" {
-			break
+	if body == "" {
+		fmt.Println("describe what happened / what you'd like — blank line to finish:")
+		sc := bufio.NewScanner(os.Stdin)
+		var lines []string
+		for sc.Scan() {
+			l := sc.Text()
+			if strings.TrimSpace(l) == "" {
+				break
+			}
+			lines = append(lines, l)
 		}
-		lines = append(lines, l)
+		body = strings.Join(lines, "\n")
 	}
-	body := strings.Join(lines, "\n")
 
 	var b strings.Builder
 	if body != "" {
@@ -885,6 +1283,14 @@ func cmdFeedback(args []string) {
 		fmt.Fprintf(&b, "active claude profile: %s\n", active)
 	}
 
+	// Always apply privacy redaction layer to title and full body before creating GitHub issue
+	cleanTitle, _ := privacy.RedactString(title)
+	cleanBody, _ := privacy.RedactString(b.String())
+	if home := os.Getenv("HOME"); home != "" {
+		cleanTitle = strings.ReplaceAll(cleanTitle, home, "~")
+		cleanBody = strings.ReplaceAll(cleanBody, home, "~")
+	}
+
 	label := "bug"
 	if kind == "idea" {
 		label = "enhancement"
@@ -892,7 +1298,7 @@ func cmdFeedback(args []string) {
 
 	ghPath, err := exec.LookPath("gh")
 	if err == nil {
-		cmd := exec.Command(ghPath, "issue", "create", "-R", feedbackRepo, "-t", title, "-b", b.String(), "-l", label)
+		cmd := exec.Command(ghPath, "issue", "create", "-R", feedbackRepo, "-t", cleanTitle, "-b", cleanBody, "-l", label)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		cmd.Stdin = os.Stdin
@@ -904,7 +1310,7 @@ func cmdFeedback(args []string) {
 	}
 
 	u := fmt.Sprintf("https://github.com/%s/issues/new?title=%s&body=%s",
-		feedbackRepo, url.QueryEscape(title), url.QueryEscape(b.String()))
+		feedbackRepo, url.QueryEscape(cleanTitle), url.QueryEscape(cleanBody))
 	fmt.Println("opening:", u)
 	var openCmd *exec.Cmd
 	switch runtime.GOOS {

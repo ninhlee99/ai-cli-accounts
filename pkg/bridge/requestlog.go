@@ -70,7 +70,7 @@ func logChatRequest(r *http.Request, pool *router.AccountPoolRouter, req *types.
 	if req != nil {
 		msgs = req.Messages
 	}
-	monitor.AppendFullIO(monitor.FullIO{
+	monitor.RecordErrorDiagnostic(monitor.ErrorDiagnostic{
 		Time:       now,
 		Account:    account,
 		Dialect:    dialect,

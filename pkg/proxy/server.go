@@ -347,6 +347,11 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 	})
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodConnect {
+			handleConnectTunnel(w, r)
+			return
+		}
+
 		path := r.URL.Path
 
 		if strings.HasPrefix(path, "/_am/") {
@@ -360,6 +365,14 @@ func newHandler(rot *Rotator, life *Lifecycle, mode *ProxyMode, chatPool, toolPo
 		}
 
 		// Gemini / Antigravity Gateway
+		if path == "/v1beta/models" {
+			bridge.HandleGeminiModels(w, r)
+			return
+		}
+		if strings.Contains(path, ":countTokens") {
+			bridge.HandleGeminiCountTokens(w, r)
+			return
+		}
 		if strings.Contains(path, ":generateContent") || strings.Contains(path, ":streamGenerateContent") {
 			bridge.HandleGeminiGenerateContent(w, r, chatPool)
 			return

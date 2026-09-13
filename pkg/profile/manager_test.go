@@ -2,7 +2,9 @@ package profile
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -182,3 +184,35 @@ func TestProfile_TransferRoundtrip(t *testing.T) {
 		t.Fatalf("openedBackup mismatch: %+v", openedBackup)
 	}
 }
+
+func TestDetectAccount_JWTAndFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "creds.json")
+
+	// Craft a JWT token with email
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"email":"dev@antigravity.test","name":"Developer"}`))
+	fakeJWT := header + "." + payload + ".fakesig"
+
+	fileContent := fmt.Sprintf(`{"auth":{"id_token":%q}}`, fakeJWT)
+	if err := os.WriteFile(filePath, []byte(fileContent), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	spec := types.ToolSpec{
+		Name: "testtool",
+		Artifacts: []types.Artifact{
+			{
+				Kind:         "file",
+				Path:         filePath,
+				AccountField: "jwt:auth.id_token:email",
+			},
+		},
+	}
+
+	got := DetectAccount(spec)
+	if got != "dev@antigravity.test" {
+		t.Errorf("DetectAccount = %q, want %q", got, "dev@antigravity.test")
+	}
+}
+

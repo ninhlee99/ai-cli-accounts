@@ -47,13 +47,16 @@ func DefaultToolConfig() ToolConfig {
 			{Kind: "file", Path: j(".codex/auth.json"), AccountField: "jwt:tokens.id_token:email"},
 		}},
 		"gemini": {Name: "gemini", Artifacts: []Artifact{
+			{Kind: "keychain", Service: "gemini", Account: "antigravity", Optional: true, AccountField: "jwt:id_token:email"},
 			{Kind: "file", Path: j(".gemini/oauth_creds.json"), Optional: true, AccountField: "jwt:id_token:email"},
 			{Kind: "file", Path: j(".gemini/google_accounts.json"), Optional: true, AccountField: "active"},
 			{Kind: "file", Path: j(".gemini/installation_id"), Optional: true},
 		}},
-		// antigravity is a placeholder: no login-detection artifacts yet, so
-		// it always shows up as "not logged in" / "(none — am add antigravity)"
-		// until real detection logic exists for it.
-		"antigravity": {Name: "antigravity", Artifacts: []Artifact{}},
+		"antigravity": {Name: "antigravity", Artifacts: []Artifact{
+			{Kind: "keychain", Service: "gemini", Account: "antigravity", Optional: true, AccountField: "jwt:id_token:email"},
+			{Kind: "file", Path: j(".gemini/google_accounts.json"), Optional: true, AccountField: "active"},
+			{Kind: "file", Path: j(".gemini/installation_id"), Optional: true},
+		}},
 	}}
 }
+

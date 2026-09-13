@@ -196,6 +196,13 @@ func postAndClose(url string) {
 	}
 }
 
+// RegisterSession registers (or deregisters) a client process with the supervisor.
+func RegisterSession(pid int, event string) {
+	if pid > 1 && ProxyUp() {
+		postAndClose(fmt.Sprintf("%s/_am/session?pid=%d&event=%s&op=%s", ProxyBase(), pid, event, event))
+	}
+}
+
 func attachedSessions() int {
 	resp, err := http.Get(ProxyBase() + "/_am/status")
 	if err != nil {

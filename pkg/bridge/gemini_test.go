@@ -218,3 +218,64 @@ func TestGeminiBodyToChatRequest_ParallelFIFOToolCallMapping(t *testing.T) {
 		t.Errorf("toolMsg2 ToolCallID = %q, want %q", toolMsg2.ToolCallID, id2)
 	}
 }
+
+func TestHandleGeminiCountTokens(t *testing.T) {
+	reqBody := `{
+		"contents": [
+			{"role": "user", "parts": [{"text": "Calculate tokens for this prompt."}]}
+		]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-2.5-flash:countTokens", bytes.NewBufferString(reqBody))
+	rec := httptest.NewRecorder()
+
+	bridge.HandleGeminiCountTokens(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		TotalTokens int `json:"totalTokens"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if resp.TotalTokens <= 0 {
+		t.Errorf("expected positive totalTokens, got %d", resp.TotalTokens)
+	}
+}
+
+func TestHandleGeminiModels(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1beta/models", nil)
+	rec := httptest.NewRecorder()
+
+	bridge.HandleGeminiModels(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Models []struct {
+			Name        string `json:"name"`
+			DisplayName string `json:"displayName"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if len(resp.Models) == 0 {
+		t.Fatal("expected non-empty models list")
+	}
+	found := false
+	for _, m := range resp.Models {
+		if strings.Contains(m.Name, "gemini-3.8-flash") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected gemini-3.8-flash in models list: %+v", resp.Models)
+	}
+}
+
